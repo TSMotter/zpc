@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+message Batch {
+
+    message Sample {
+        string channel = 2;
+        uint32 frequency = 3;
+        double time = 4;
+        double value = 5;
+    }
+
+    repeated Sample items = 1;
+}

@@ -1,136 +1,186 @@
-/*
- * Copyright (c) 2017 Linaro Limited
+/***************************************************************************************************
  *
- * SPDX-License-Identifier: Apache-2.0
- */
-
-#include <zephyr/kernel.h>
+ ***************************************************************************************************/
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/kernel.h>
+#include <zephyr/kernel/thread_stack.h>
 #include <zephyr/sys/printk.h>
-#include <zephyr/sys/__assert.h>
-#include <string.h>
 
-/* size of stack area used by each thread */
-#define STACKSIZE 1024
 
-/* scheduling priority used by each thread */
-#define PRIORITY 7
+/***************************************************************************************************
+ * Defines
+ ***************************************************************************************************/
+#define STACK_SIZE_CONSUMER_THREAD 512
+#define PRIORITY_CONSUMER_THREAD 5
+#define MY_RING_BUF_BYTES 1024
 
-#define LED0_NODE DT_ALIAS(led0)
-#define LED1_NODE DT_ALIAS(led1)
-#define LED2_NODE DT_ALIAS(led2)
-#define LED3_NODE DT_ALIAS(led3)
+#define GREEN_LED_NODE DT_ALIAS(green_led)
 
-#if !DT_NODE_HAS_STATUS(LED0_NODE, okay)
-#error "Unsupported board: led0 devicetree alias is not defined"
-#endif
+/* change this to any other UART peripheral if desired */
+#define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
+#define MSG_SIZE 32
 
-#if !DT_NODE_HAS_STATUS(LED1_NODE, okay)
-#error "Unsupported board: led1 devicetree alias is not defined"
-#endif
 
-#if !DT_NODE_HAS_STATUS(LED2_NODE, okay)
-#error "Unsupported board: led1 devicetree alias is not defined"
-#endif
-
-#if !DT_NODE_HAS_STATUS(LED3_NODE, okay)
-#error "Unsupported board: led1 devicetree alias is not defined"
-#endif
-
-struct printk_data_t {
-	void *fifo_reserved; /* 1st word reserved for use by fifo */
-	uint32_t led;
-	uint32_t cnt;
+/***************************************************************************************************
+ * Types
+ ***************************************************************************************************/
+struct printk_data_t
+{
+    void    *fifo_reserved; /* 1st word reserved for use by fifo */
+    uint32_t led;
+    uint32_t cnt;
+};
+struct led
+{
+    struct gpio_dt_spec spec;
+    uint8_t             num;
 };
 
-K_FIFO_DEFINE(printk_fifo);
+/***************************************************************************************************
+ * Forward declaration
+ ***************************************************************************************************/
+void blink_led0(void *, void *, void *);
+void blink(const struct led *led, uint32_t sleep_ms, uint32_t id);
+void serial_cb(const struct device *dev, void *user_data);
+void print_uart(char *buf);
 
-struct led {
-	struct gpio_dt_spec spec;
-	uint8_t num;
+/***************************************************************************************************
+ * Globals
+ ***************************************************************************************************/
+K_THREAD_STACK_DEFINE(consumer_thread_stack, STACK_SIZE_CONSUMER_THREAD);
+static const struct led green_led = {
+    .spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
+    .num  = 0,
 };
 
-static const struct led led0 = {
-	.spec = GPIO_DT_SPEC_GET_OR(LED0_NODE, gpios, {0}),
-	.num = 0,
-};
+K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
+static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
+static char                       rx_buf[MSG_SIZE];
+static int                        rx_buf_pos;
 
-static const struct led led1 = {
-	.spec = GPIO_DT_SPEC_GET_OR(LED1_NODE, gpios, {0}),
-	.num = 1,
-};
 
-static const struct led led2 = {
-	.spec = GPIO_DT_SPEC_GET_OR(LED2_NODE, gpios, {0}),
-	.num = 1,
-};
+/***************************************************************************************************
+ * Main
+ ***************************************************************************************************/
+int main(int argc, char **argv)
+{
+    if (!device_is_ready(uart_dev))
+    {
+        printk("UART device not found!");
+        return 0;
+    }
+    uart_irq_callback_user_data_set(uart_dev, serial_cb, NULL);
+    uart_irq_rx_enable(uart_dev);
 
-static const struct led led3 = {
-	.spec = GPIO_DT_SPEC_GET_OR(LED3_NODE, gpios, {0}),
-	.num = 1,
-};
+    static struct k_thread consumer_thread_data;
+    k_thread_create(&consumer_thread_data, consumer_thread_stack,
+                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &blink_led0, NULL, NULL, NULL,
+                    PRIORITY_CONSUMER_THREAD, 0, K_FOREVER);
+    k_thread_name_set(&consumer_thread_data, "consumer_thread");
+    k_thread_start(&consumer_thread_data);
+
+    print_uart("Hello! I'm your echo bot.\r\n");
+    print_uart("Tell me something and press enter:\r\n");
+
+    char tx_buf[MSG_SIZE];
+    while (k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0)
+    {
+        print_uart("Echo: ");
+        print_uart(tx_buf);
+        print_uart("\r\n");
+    }
+
+    return 0;
+}
+
+
+/***************************************************************************************************
+ * Function bodies
+ ***************************************************************************************************/
+void blink_led0(void *, void *, void *)
+{
+    blink(&green_led, 50, 0);
+}
 
 void blink(const struct led *led, uint32_t sleep_ms, uint32_t id)
 {
-	const struct gpio_dt_spec *spec = &led->spec;
-	int cnt = 0;
-	int ret;
+    const struct gpio_dt_spec *spec = &led->spec;
+    int                        cnt  = 0;
+    int                        ret;
 
-	if (!device_is_ready(spec->port)) {
-		printk("Error: %s device is not ready\n", spec->port->name);
-		return;
-	}
+    if (!device_is_ready(spec->port))
+    {
+        printk("Error: %s device is not ready\n", spec->port->name);
+        return;
+    }
 
-	ret = gpio_pin_configure_dt(spec, GPIO_OUTPUT);
-	if (ret != 0) {
-		printk("Error %d: failed to configure pin %d (LED '%d')\n",
-			ret, spec->pin, led->num);
-		return;
-	}
+    ret = gpio_pin_configure_dt(spec, GPIO_OUTPUT);
+    if (ret != 0)
+    {
+        printk("Error %d: failed to configure pin %d (LED '%d')\n", ret, spec->pin, led->num);
+        return;
+    }
 
-	while (1) {
-		gpio_pin_set(spec->port, spec->pin, cnt % 2);
-
-		struct printk_data_t tx_data = { .led = id, .cnt = cnt };
-
-		size_t size = sizeof(struct printk_data_t);
-		char *mem_ptr = k_malloc(size);
-		__ASSERT_NO_MSG(mem_ptr != 0);
-
-		memcpy(mem_ptr, &tx_data, size);
-
-		k_fifo_put(&printk_fifo, mem_ptr);
-
-		k_msleep(sleep_ms);
-		cnt++;
-	}
+    while (1)
+    {
+        gpio_pin_set(spec->port, spec->pin, cnt % 2);
+        k_msleep(sleep_ms);
+        cnt++;
+    }
 }
 
-void blinkA(void)
+/*
+ * Read characters from UART until line end is detected. Afterwards push the
+ * data to the message queue.
+ */
+void serial_cb(const struct device *dev, void *user_data)
 {
-	blink(&led2, 50, 0);
+    uint8_t c;
+
+    if (!uart_irq_update(uart_dev))
+    {
+        return;
+    }
+
+    if (!uart_irq_rx_ready(uart_dev))
+    {
+        return;
+    }
+
+    /* read until FIFO empty */
+    while (uart_fifo_read(uart_dev, &c, 1) == 1)
+    {
+        if ((c == '\n' || c == '\r') && rx_buf_pos > 0)
+        {
+            /* terminate string */
+            rx_buf[rx_buf_pos] = '\0';
+
+            /* if queue is full, message is silently dropped */
+            k_msgq_put(&uart_msgq, &rx_buf, K_NO_WAIT);
+
+            /* reset the buffer (it was copied to the msgq) */
+            rx_buf_pos = 0;
+        }
+        else if (rx_buf_pos < (sizeof(rx_buf) - 1))
+        {
+            rx_buf[rx_buf_pos++] = c;
+        }
+        /* else: characters beyond buffer size are dropped */
+    }
 }
 
-void blinkB(void)
+/*
+ * Print a null-terminated string character by character to the UART interface
+ */
+void print_uart(char *buf)
 {
-	blink(&led3, 2000, 1);
-}
+    int msg_len = strlen(buf);
 
-void uart_out(void)
-{
-	while (1) {
-		struct printk_data_t *rx_data = k_fifo_get(&printk_fifo,
-							   K_FOREVER);
-		printk("Toggled led%d; counter=%d\n",
-		       rx_data->led, rx_data->cnt);
-		k_free(rx_data);
-	}
+    for (int i = 0; i < msg_len; i++)
+    {
+        uart_poll_out(uart_dev, buf[i]);
+    }
 }
-
-K_THREAD_DEFINE(blinkA_id, STACKSIZE, blinkA, NULL, NULL, NULL,
-		PRIORITY, 0, 0);
-K_THREAD_DEFINE(blinkB_id, STACKSIZE, blinkB, NULL, NULL, NULL,
-		PRIORITY, 0, 0);
-K_THREAD_DEFINE(uart_out_id, STACKSIZE, uart_out, NULL, NULL, NULL,
-		PRIORITY, 0, 0);
