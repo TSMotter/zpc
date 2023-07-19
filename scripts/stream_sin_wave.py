@@ -123,6 +123,7 @@ class SinWave:
 **********"""
 if __name__ == '__main__':
     try:
+        serial_error = 1
         parser = argparse.ArgumentParser(
             description='Streams a sin wave',
             epilog='No epilog')
@@ -150,10 +151,8 @@ if __name__ == '__main__':
         args = parser.parse_args()
         logging.basicConfig(level=args.loglevel)
 
-        serial_error = 1
         ser = serial.Serial(port=args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
         serial_error = 0
-
         S = SinWave(args, ser)
         S.generate_samples_protobuf(S.action_write_serialized_data_on_serial)
 

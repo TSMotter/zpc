@@ -1,6 +1,8 @@
 build
 __pycache__
 .vscode
+*.hex
+*.bin
 
 # Cache files, generates by Zephir
 .temp/

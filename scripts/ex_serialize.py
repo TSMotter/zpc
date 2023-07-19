@@ -1,6 +1,6 @@
 import sin_wave_pb2
 
-FILEP = "bin.data"
+FILEP = "batch.bin"
 
 serializer = sin_wave_pb2.Batch()
 
