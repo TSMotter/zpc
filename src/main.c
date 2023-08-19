@@ -8,65 +8,80 @@
 #include <zephyr/kernel.h>
 #include <zephyr/kernel/thread_stack.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/ring_buffer.h>
+#include <zephyr/sys/util.h>
 
+#include <pb_encode.h>
+#include <pb_decode.h>
+#include "proto/sin_wave.pb.h"
 
 /***************************************************************************************************
  * Defines
  ***************************************************************************************************/
-#define STACK_SIZE_CONSUMER_THREAD 512
-#define PRIORITY_CONSUMER_THREAD 5
-#define MY_RING_BUF_BYTES 1024
+// Thread related
+#define CONSUMER_THREAD_STACK_SIZE 2048
+#define CONSUMER_THREAD_PRIO 1
+#define LED_THREAD_STACK_SIZE 256
+#define LED_THREAD_PRIO 2
 
-#define GREEN_LED_NODE DT_ALIAS(green_led)
+// LED related
+#define GREEN_LED_NODE DT_NODELABEL(green_led_4)
 
-/* change this to any other UART peripheral if desired */
+// UART related
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
 #define MSG_SIZE 32
+
+// Ringbuffer related
+#define RB_INCOMING_SIZE 1024
 
 
 /***************************************************************************************************
  * Types
  ***************************************************************************************************/
-struct printk_data_t
-{
-    void    *fifo_reserved; /* 1st word reserved for use by fifo */
-    uint32_t led;
-    uint32_t cnt;
-};
 struct led
 {
     struct gpio_dt_spec spec;
     uint8_t             num;
 };
 
+struct printk_data_t
+{
+    void    *fifo_reserved;
+    uint32_t led;
+    uint32_t cnt;
+};
+
 /***************************************************************************************************
- * Forward declaration
+ * Functions forward declaration
  ***************************************************************************************************/
+void consume_bytes(void *p1, void *p2, void *p3);
 void blink_led0(void *, void *, void *);
 void blink(const struct led *led, uint32_t sleep_ms, uint32_t id);
 void serial_cb(const struct device *dev, void *user_data);
-void print_uart(char *buf);
 
 /***************************************************************************************************
  * Globals
  ***************************************************************************************************/
-K_THREAD_STACK_DEFINE(consumer_thread_stack, STACK_SIZE_CONSUMER_THREAD);
-static const struct led green_led = {
-    .spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
-    .num  = 0,
-};
-
+K_THREAD_STACK_DEFINE(consumer_thread_stack, CONSUMER_THREAD_STACK_SIZE);
+K_THREAD_STACK_DEFINE(led_thread_stack, LED_THREAD_STACK_SIZE);
 K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
-static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
-static char                       rx_buf[MSG_SIZE];
-static int                        rx_buf_pos;
 
+static const struct led green_led = {.spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
+                                     .num  = 0};
+
+static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
+
+
+uint8_t         rb_incoming_buffer[RB_INCOMING_SIZE];
+struct ring_buf rb_incoming;
 
 /***************************************************************************************************
  * Main
  ***************************************************************************************************/
 int main(int argc, char **argv)
 {
+    ring_buf_init(&rb_incoming, sizeof(rb_incoming_buffer), rb_incoming_buffer);
+
     if (!device_is_ready(uart_dev))
     {
         printk("UART device not found!");
@@ -75,23 +90,20 @@ int main(int argc, char **argv)
     uart_irq_callback_user_data_set(uart_dev, serial_cb, NULL);
     uart_irq_rx_enable(uart_dev);
 
-    static struct k_thread consumer_thread_data;
-    k_thread_create(&consumer_thread_data, consumer_thread_stack,
-                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &blink_led0, NULL, NULL, NULL,
-                    PRIORITY_CONSUMER_THREAD, 0, K_FOREVER);
-    k_thread_name_set(&consumer_thread_data, "consumer_thread");
-    k_thread_start(&consumer_thread_data);
+    static struct k_thread consumer_thread_id;
+    k_thread_create(&consumer_thread_id, consumer_thread_stack,
+                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, &rb_incoming,
+                    NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
+    k_thread_name_set(&consumer_thread_id, "consumer_thread");
 
-    print_uart("Hello! I'm your echo bot.\r\n");
-    print_uart("Tell me something and press enter:\r\n");
+    static struct k_thread led_thread_id;
+    k_thread_create(&led_thread_id, led_thread_stack, K_THREAD_STACK_SIZEOF(led_thread_stack),
+                    &blink_led0, NULL, NULL, NULL, LED_THREAD_PRIO, 0, K_FOREVER);
+    k_thread_name_set(&led_thread_id, "led_thread");
 
-    char tx_buf[MSG_SIZE];
-    while (k_msgq_get(&uart_msgq, &tx_buf, K_FOREVER) == 0)
-    {
-        print_uart("Echo: ");
-        print_uart(tx_buf);
-        print_uart("\r\n");
-    }
+
+    // k_thread_start(&consumer_thread_id);
+    k_thread_start(&led_thread_id);
 
     return 0;
 }
@@ -100,6 +112,29 @@ int main(int argc, char **argv)
 /***************************************************************************************************
  * Function bodies
  ***************************************************************************************************/
+void consume_bytes(void *p1, void *p2, void *p3)
+{
+    if (p1 == NULL)
+    {
+        return;
+    }
+
+    struct ring_buf *rb = (struct ring_buf *) p1;
+
+    uint8_t buffer[64];
+    int     rb_len;
+
+    while (1)
+    {
+        rb_len = ring_buf_get(rb, buffer, sizeof(buffer));
+        if (rb_len)
+        {
+        }
+
+        k_sleep(K_MSEC(100));
+    }
+}
+
 void blink_led0(void *, void *, void *)
 {
     blink(&green_led, 50, 0);
@@ -132,55 +167,34 @@ void blink(const struct led *led, uint32_t sleep_ms, uint32_t id)
     }
 }
 
-/*
- * Read characters from UART until line end is detected. Afterwards push the
- * data to the message queue.
- */
 void serial_cb(const struct device *dev, void *user_data)
 {
-    uint8_t c;
+    ARG_UNUSED(user_data);
 
-    if (!uart_irq_update(uart_dev))
+    while (uart_irq_update(dev) && uart_irq_is_pending(dev))
     {
-        return;
-    }
-
-    if (!uart_irq_rx_ready(uart_dev))
-    {
-        return;
-    }
-
-    /* read until FIFO empty */
-    while (uart_fifo_read(uart_dev, &c, 1) == 1)
-    {
-        if ((c == '\n' || c == '\r') && rx_buf_pos > 0)
+        if (uart_irq_rx_ready(dev))
         {
-            /* terminate string */
-            rx_buf[rx_buf_pos] = '\0';
+            int     recv_len, rb_len;
+            uint8_t buffer[64];
+            size_t  len = MIN(ring_buf_space_get(&rb_incoming), sizeof(buffer));
 
-            /* if queue is full, message is silently dropped */
-            k_msgq_put(&uart_msgq, &rx_buf, K_NO_WAIT);
+            recv_len = uart_fifo_read(dev, buffer, len);
+            if (recv_len < 0)
+            {
+                // LOG_ERR("Failed to read UART FIFO");
+                recv_len = 0;
+            };
 
-            /* reset the buffer (it was copied to the msgq) */
-            rx_buf_pos = 0;
+            rb_len = ring_buf_put(&rb_incoming, buffer, recv_len);
+            if (rb_len < recv_len)
+            {
+                // LOG_ERR("Drop %u bytes", recv_len - rb_len);
+            }
         }
-        else if (rx_buf_pos < (sizeof(rx_buf) - 1))
+
+        if (uart_irq_tx_ready(dev))
         {
-            rx_buf[rx_buf_pos++] = c;
         }
-        /* else: characters beyond buffer size are dropped */
-    }
-}
-
-/*
- * Print a null-terminated string character by character to the UART interface
- */
-void print_uart(char *buf)
-{
-    int msg_len = strlen(buf);
-
-    for (int i = 0; i < msg_len; i++)
-    {
-        uart_poll_out(uart_dev, buf[i]);
     }
 }

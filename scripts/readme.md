@@ -1,1 +1,2 @@
-- It is possible that zephyr venv contains versions completely different for these packages then the version installed on the system (outside zephyr venv) and thus some calls might work within inside the venv and not outside it or vice versa
+- It is possible that zephyr venv contains different versions of python packages then the version installed on the system
+- Because of that, some calls might work within the venv and not work outside it or vice versa

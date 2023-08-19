@@ -4,6 +4,7 @@ import json
 import logging
 import argparse
 import serial
+import os
 
 import sin_wave_pb2
 
@@ -102,7 +103,7 @@ class SinWave:
             time.sleep(self.batch_cadency)
             if (self.dryrun == False):
                 action(batch_serializer.SerializeToString())
-    
+
     def action_dumb(self, batch):
         ...
 
@@ -138,7 +139,7 @@ if __name__ == '__main__':
             '--device',
             type=str,
             required=False,
-            help="Device name"),
+            help="Device name. Ex: /dev/ttyUSB0"),
         parser.add_argument(
             '-l',
             '--loglevel',
@@ -151,15 +152,21 @@ if __name__ == '__main__':
         args = parser.parse_args()
         logging.basicConfig(level=args.loglevel)
 
-        ser = serial.Serial(port=args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
-        serial_error = 0
-        S = SinWave(args, ser)
-        S.generate_samples_protobuf(S.action_write_serialized_data_on_serial)
+        if(args.device is None):
+            ser = port=args.device
+            serial_ok = False
+            S = SinWave(args, ser)
+            S.generate_samples_json(S.action_print)
+        else:
+            ser = serial.Serial(port=args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
+            serial_ok = True
+            S = SinWave(args, ser)
+            S.generate_samples_protobuf(S.action_write_serialized_data_on_serial)
 
     except KeyboardInterrupt:
         logging.info('KeyboardInterrupt caught. Performing any cleanup needed')
         exit(0)
     finally:
         logging.info('Finally block reached.')
-        if not serial_error:
+        if serial_ok is True:
             ser.close()
