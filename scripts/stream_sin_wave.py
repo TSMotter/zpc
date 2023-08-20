@@ -4,13 +4,37 @@ import json
 import logging
 import argparse
 import serial
-import os
+from enum import Enum, auto
 
 import sin_wave_pb2
 
+class OP(Enum):
+    JSON_TO_STDOUT = 0
+    PROTOBUF_TO_FILE = auto()
+    PROTOBUF_TO_SERIAL = auto()
+
+OPERATIONS = ["JSON_TO_STDOUT", "PROTOBUF_TO_FILE", "PROTOBUF_TO_SERIAL"]
+SERIAL = None
+
+class Actions:
+    def __init__(self, f="batch.bin"):
+        self.filep = f
+
+    def dumb(self, batch):
+        ...
+
+    def write_to_stdout(self, batch):
+        print(batch)
+
+    def write_to_file(self, batch):
+        with open(self.filep, "ab") as f:
+            f.write(batch)
+
+    def write_to_serial(self, batch):
+        SERIAL.write(batch)
 
 class SinWave:
-    def __init__(self, args, serial):
+    def __init__(self, ch, tbd, dry):
         # Class members
         self.samples_in_each_sin_cycle = None
         self.angular_frequency = None
@@ -21,16 +45,15 @@ class SinWave:
         self.time_before_die = None
         self.sin_amplitude = None
         self.channel = None
-        self.serial = None
+        self.overall_samples_cntr = 0
 
         # Constants
         self.sin_amplitude = 1.0
-        self.time_before_die = 30
+        self.time_before_die = tbd
 
-        # Initialization 
-        self.channel = str(args.channel)
-        self.dryrun = args.dryrun
-        self.serial = serial
+        # Initializations
+        self.channel = str(ch)
+        self.dryrun = dry
 
         self._gatter_parameters()
         self._log()
@@ -59,64 +82,82 @@ class SinWave:
         logging.debug(f"self.sin_amplitude: {self.sin_amplitude}")
         logging.debug(f"self.channel: {self.channel}")
 
-    def generate_samples_json(self, action):
-        samples_cntr = 0
+    def _generate_sample(self):
+        T = (self.overall_samples_cntr / self.num_sample_per_second)
+        sample_value = self.sin_amplitude * math.sin(self.angular_frequency * T)
+
+        channel = self.channel
+        freq = self.samples_in_each_sin_cycle
+        val = float(format(sample_value, '.10f'))
+        time = float(format(T, '.10f'))
+        self.overall_samples_cntr = self.overall_samples_cntr + 1
+        return channel, freq, val, time
+
+    def _generate_batch_as_json(self):
+        batch_samples_as_json = []
+
+        for _ in range(self.num_samples_per_batch):
+            c, f, v, t = self._generate_sample()
+
+            sample_as_json = {"channel": c,
+                            "frequency": f,
+                            "value": v,
+                            "time": t}
+            batch_samples_as_json.append(sample_as_json)
+
+        return json.dumps(batch_samples_as_json)
+
+    def _generate_batch_as_protobuf(self):
+        batch_serializer = sin_wave_pb2.Batch()
+
+        for _ in range(self.num_samples_per_batch):
+            c, f, v, t = self._generate_sample()
+
+            sample_as_protobuf = batch_serializer.items.add()
+            sample_as_protobuf.channel = c
+            sample_as_protobuf.frequency = f
+            sample_as_protobuf.value = v
+            sample_as_protobuf.time = t
+
+        return batch_serializer.SerializeToString()
+
+    def stream_json(self, action: callable):
         start_time = time.time()
         while time.time() - start_time <= self.time_before_die:
-            batch_samples_as_json = []
 
-            for sample_idx in range(self.num_samples_per_batch):
-                T = ((sample_idx+samples_cntr)/self.num_sample_per_second)
-                sample_value = self.sin_amplitude * math.sin(self.angular_frequency * T)
-
-                sample_as_json = {"channel": self.channel,
-                                "frequency": self.samples_in_each_sin_cycle,
-                                "value": float(format(sample_value, '.10f')),
-                                "time": float(format(T, '.10f'))}
-                batch_samples_as_json.append(sample_as_json)
-
-            samples_cntr = samples_cntr + self.num_samples_per_batch
-            batch_as_json_object = json.dumps(batch_samples_as_json)
+            batch = self._generate_batch_as_json()
 
             time.sleep(self.batch_cadency)
             if (self.dryrun == False):
-                action(batch_as_json_object)
+                action(batch)
 
-    def generate_samples_protobuf(self, action):
-        samples_cntr = 0
+    def stream_protobuf(self, action: callable):
         start_time = time.time()
         while time.time() - start_time <= self.time_before_die:
-            batch_serializer = sin_wave_pb2.Batch()
 
-            for sample_idx in range(self.num_samples_per_batch):
-                T = ((sample_idx+samples_cntr)/self.num_sample_per_second)
-                sample_value = self.sin_amplitude * math.sin(self.angular_frequency * T)
-
-                sample_as_protobuf = batch_serializer.items.add()
-                sample_as_protobuf.channel = self.channel
-                sample_as_protobuf.frequency = self.samples_in_each_sin_cycle
-                sample_as_protobuf.value = float(format(sample_value, '.10f'))
-                sample_as_protobuf.time = float(format(T, '.10f'))
-
-            samples_cntr = samples_cntr + self.num_samples_per_batch
+            batch = self._generate_batch_as_protobuf()
 
             time.sleep(self.batch_cadency)
             if (self.dryrun == False):
-                action(batch_serializer.SerializeToString())
+                action(batch)
 
-    def action_dumb(self, batch):
-        ...
+class Streamer():
+    def __init__(self, args):
+        self.args = args
 
-    def action_print(self, batch):
-        print(batch)
+    def stream(self):
+        global SERIAL, OPERATIONS
 
-    def action_write_serialized_data_to_file(self, batch):
-        with open("batch.bin", "ab") as f:
-            f.write(batch)
+        action = Actions()
+        sw = SinWave(self.args.channel, 30, self.args.dryrun)
 
-    def action_write_serialized_data_on_serial(self, batch):
-        self.serial.write(batch)
-
+        if(self.args.operation == OPERATIONS[OP.JSON_TO_STDOUT.value]):
+            sw.stream_json(action.write_to_stdout)
+        elif(self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
+            sw.stream_protobuf(action.write_to_file)
+        elif(self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
+            SERIAL = serial.Serial(port=self.args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
+            sw.stream_protobuf(action.write_to_serial)
 
 
 """**********
@@ -126,16 +167,27 @@ if __name__ == '__main__':
     try:
         serial_error = 1
         parser = argparse.ArgumentParser(
-            description='Streams a sin wave',
+            description='Streams samples of a sin wave based on the channel parameter',
             epilog='No epilog')
+        parser.add_argument(
+            '-op',
+            '--operation',
+            default=OPERATIONS[0],
+            type=str,
+            required=False,
+            help="Choose the operation mode",
+            choices=OPERATIONS),
         parser.add_argument(
             '-c',
             '--channel',
             type=str,
             required=True,
-            help="Channel name in the pattern 'channel_20_2000_2'"),
+            help="""Channel name follows the pattern 'channel_X_Y_Z'.
+            X is the number of samples present in each sinusoidal cycle
+            Y represents the time step (in milliseconds) between 2 subsequent batches of data.
+            Z is the frequency of the sinusoidal wave itself"""),
         parser.add_argument(
-            '-D',
+            '-d',
             '--device',
             type=str,
             required=False,
@@ -149,24 +201,17 @@ if __name__ == '__main__':
             help="Log level",
             choices=["ERROR", "WARNING", "INFO", "DEBUG"]),
         parser.add_argument('--dryrun', default=False, action='store_true')
+
         args = parser.parse_args()
         logging.basicConfig(level=args.loglevel)
 
-        if(args.device is None):
-            ser = port=args.device
-            serial_ok = False
-            S = SinWave(args, ser)
-            S.generate_samples_json(S.action_print)
-        else:
-            ser = serial.Serial(port=args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
-            serial_ok = True
-            S = SinWave(args, ser)
-            S.generate_samples_protobuf(S.action_write_serialized_data_on_serial)
+        s = Streamer(args)
+        s.stream()
 
     except KeyboardInterrupt:
-        logging.info('KeyboardInterrupt caught. Performing any cleanup needed')
+        logging.info('KeyboardInterrupt caught.')
         exit(0)
     finally:
         logging.info('Finally block reached.')
-        if serial_ok is True:
-            ser.close()
+        if SERIAL is not None:
+            SERIAL.close()

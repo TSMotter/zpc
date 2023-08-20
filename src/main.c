@@ -102,8 +102,14 @@ int main(int argc, char **argv)
     k_thread_name_set(&led_thread_id, "led_thread");
 
 
-    // k_thread_start(&consumer_thread_id);
+    k_thread_start(&consumer_thread_id);
     k_thread_start(&led_thread_id);
+
+
+    while (1)
+    {
+        k_sleep(K_MSEC(100));
+    }
 
     return 0;
 }
@@ -126,12 +132,12 @@ void consume_bytes(void *p1, void *p2, void *p3)
 
     while (1)
     {
+        k_sleep(K_MSEC(100));
+
         rb_len = ring_buf_get(rb, buffer, sizeof(buffer));
         if (rb_len)
         {
         }
-
-        k_sleep(K_MSEC(100));
     }
 }
 
@@ -176,7 +182,7 @@ void serial_cb(const struct device *dev, void *user_data)
         if (uart_irq_rx_ready(dev))
         {
             int     recv_len, rb_len;
-            uint8_t buffer[64];
+            uint8_t buffer[125];
             size_t  len = MIN(ring_buf_space_get(&rb_incoming), sizeof(buffer));
 
             recv_len = uart_fifo_read(dev, buffer, len);
