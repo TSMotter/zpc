@@ -76,7 +76,12 @@ function func_format()
     # instead of stdin.
 
     find . -iname '*.c' | grep --invert-match './build' | grep --invert-match './external' | xargs clang-format -i -style=file
-    find . -iname '*.h' | grep --invert-match './build' | grep --invert-match './external' | xargs clang-format -i -style=file
+
+    if find . -iname '*.h' | grep --invert-match './build' | grep --invert-match './external'; then
+        find . -iname '*.h' | grep --invert-match './build' | grep --invert-match './external' | xargs clang-format -i -style=file
+    fi
+
+    python -m autopep8 -i -a -a -a scripts/stream_sin_wave.py
 }
 
 ################################################################################

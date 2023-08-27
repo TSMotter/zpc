@@ -21,6 +21,7 @@
 // Thread related
 #define CONSUMER_THREAD_STACK_SIZE 2048
 #define CONSUMER_THREAD_PRIO 1
+#define CONSUMER_THREAD_RAM_BUFFER_SIZE (CONSUMER_THREAD_STACK_SIZE / 4)
 #define LED_THREAD_STACK_SIZE 256
 #define LED_THREAD_PRIO 2
 
@@ -57,7 +58,8 @@ struct printk_data_t
 void consume_bytes(void *p1, void *p2, void *p3);
 void blink_led0(void *, void *, void *);
 void blink(const struct led *led, uint32_t sleep_ms, uint32_t id);
-void serial_cb(const struct device *dev, void *user_data);
+void serial_cb_single_byte(const struct device *dev, void *user_data);
+void serial_cb_multi_byte(const struct device *dev, void *user_data);
 
 /***************************************************************************************************
  * Globals
@@ -75,6 +77,8 @@ static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 uint8_t         rb_incoming_buffer[RB_INCOMING_SIZE];
 struct ring_buf rb_incoming;
 
+static struct k_sem sem_hdlc_frame;
+
 /***************************************************************************************************
  * Main
  ***************************************************************************************************/
@@ -82,12 +86,14 @@ int main(int argc, char **argv)
 {
     ring_buf_init(&rb_incoming, sizeof(rb_incoming_buffer), rb_incoming_buffer);
 
+    k_sem_init(&sem_hdlc_frame, 0, 1);
+
     if (!device_is_ready(uart_dev))
     {
         printk("UART device not found!");
         return 0;
     }
-    uart_irq_callback_user_data_set(uart_dev, serial_cb, NULL);
+    uart_irq_callback_user_data_set(uart_dev, serial_cb_multi_byte, NULL);
     uart_irq_rx_enable(uart_dev);
 
     static struct k_thread consumer_thread_id;
@@ -127,16 +133,17 @@ void consume_bytes(void *p1, void *p2, void *p3)
 
     struct ring_buf *rb = (struct ring_buf *) p1;
 
-    uint8_t buffer[64];
-    int     rb_len;
+    uint8_t  buffer[CONSUMER_THREAD_RAM_BUFFER_SIZE];
+    uint32_t len_to_read;
 
     while (1)
     {
-        k_sleep(K_MSEC(100));
+        k_sem_take(&sem_hdlc_frame, K_FOREVER);
 
-        rb_len = ring_buf_get(rb, buffer, sizeof(buffer));
-        if (rb_len)
+        len_to_read = MIN(ring_buf_space_get(rb), CONSUMER_THREAD_RAM_BUFFER_SIZE);
+        if (ring_buf_get(rb, buffer, len_to_read) == len_to_read)
         {
+            // yahdlc_get_data(...);
         }
     }
 }
@@ -173,7 +180,50 @@ void blink(const struct led *led, uint32_t sleep_ms, uint32_t id)
     }
 }
 
-void serial_cb(const struct device *dev, void *user_data)
+void serial_cb_single_byte(const struct device *dev, void *user_data)
+{
+    if (!uart_irq_update(uart_dev))
+    {
+        return;
+    }
+
+    if (!uart_irq_rx_ready(uart_dev))
+    {
+        return;
+    }
+
+    static const uint8_t SOF       = 0x7E;
+    bool                 found_sof = false;
+    uint8_t              rx_byte;
+
+    /* read until FIFO empty */
+    while (uart_fifo_read(uart_dev, &rx_byte, 1) == 1)
+    {
+        if (rx_byte == SOF)
+        {
+            if (found_sof == false)
+            {
+                found_sof = true;
+            }
+            else
+            {
+                k_sem_give(&sem_hdlc_frame);
+                found_sof = false;
+            }
+        }
+        if (found_sof == false)
+        {
+            continue;
+        }
+
+        if (!ring_buf_put(&rb_incoming, &rx_byte, 1))
+        {
+            // error
+        }
+    }
+}
+
+void serial_cb_multi_byte(const struct device *dev, void *user_data)
 {
     ARG_UNUSED(user_data);
 

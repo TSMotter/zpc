@@ -5,16 +5,27 @@ import logging
 import argparse
 import serial
 from enum import Enum, auto
+import yahdlc
 
 import sin_wave_pb2
+
 
 class OP(Enum):
     JSON_TO_STDOUT = 0
     PROTOBUF_TO_FILE = auto()
     PROTOBUF_TO_SERIAL = auto()
+    HDLC_TO_FILE = auto()
+    HDLC_TO_SERIAL = auto()
 
-OPERATIONS = ["JSON_TO_STDOUT", "PROTOBUF_TO_FILE", "PROTOBUF_TO_SERIAL"]
+
+OPERATIONS = [
+    "JSON_TO_STDOUT",
+    "PROTOBUF_TO_FILE",
+    "PROTOBUF_TO_SERIAL",
+    "HDLC_TO_FILE",
+    "HDLC_TO_SERIAL"]
 SERIAL = None
+
 
 class Actions:
     def __init__(self, f="batch.bin"):
@@ -32,6 +43,7 @@ class Actions:
 
     def write_to_serial(self, batch):
         SERIAL.write(batch)
+
 
 class SinWave:
     def __init__(self, ch, tbd, dry):
@@ -67,24 +79,31 @@ class SinWave:
         self.angular_frequency = 2 * math.pi * sin_frequency
         self.batch_cadency = batch_cadency_ms / 1000
         num_cycles_per_batch = self.batch_cadency * sin_frequency
-        self.num_samples_per_batch = math.ceil(num_cycles_per_batch * self.samples_in_each_sin_cycle)
+        self.num_samples_per_batch = math.ceil(
+            num_cycles_per_batch * self.samples_in_each_sin_cycle)
         self.num_sample_per_second = self.samples_in_each_sin_cycle * sin_frequency
-        self.time_step_between_samples = sin_frequency*(1/self.num_samples_per_batch)
+        self.time_step_between_samples = sin_frequency * \
+            (1 / self.num_samples_per_batch)
 
     def _log(self):
-        logging.debug(f"self.samples_in_each_sin_cycle: {self.samples_in_each_sin_cycle}")
+        logging.debug(
+            f"self.samples_in_each_sin_cycle: {self.samples_in_each_sin_cycle}")
         logging.debug(f"self.angular_frequency: {self.angular_frequency}")
         logging.debug(f"self.batch_cadency: {self.batch_cadency}")
-        logging.debug(f"self.num_samples_per_batch: {self.num_samples_per_batch}")
-        logging.debug(f"self.num_sample_per_second: {self.num_sample_per_second}")
-        logging.debug(f"self.time_step_between_samples: {self.time_step_between_samples}")
+        logging.debug(
+            f"self.num_samples_per_batch: {self.num_samples_per_batch}")
+        logging.debug(
+            f"self.num_sample_per_second: {self.num_sample_per_second}")
+        logging.debug(
+            f"self.time_step_between_samples: {self.time_step_between_samples}")
         logging.debug(f"self.time_before_die: {self.time_before_die}")
         logging.debug(f"self.sin_amplitude: {self.sin_amplitude}")
         logging.debug(f"self.channel: {self.channel}")
 
     def _generate_sample(self):
         T = (self.overall_samples_cntr / self.num_sample_per_second)
-        sample_value = self.sin_amplitude * math.sin(self.angular_frequency * T)
+        sample_value = self.sin_amplitude * \
+            math.sin(self.angular_frequency * T)
 
         channel = self.channel
         freq = self.samples_in_each_sin_cycle
@@ -100,9 +119,9 @@ class SinWave:
             c, f, v, t = self._generate_sample()
 
             sample_as_json = {"channel": c,
-                            "frequency": f,
-                            "value": v,
-                            "time": t}
+                              "frequency": f,
+                              "value": v,
+                              "time": t}
             batch_samples_as_json.append(sample_as_json)
 
         return json.dumps(batch_samples_as_json)
@@ -141,6 +160,18 @@ class SinWave:
             if (self.dryrun == False):
                 action(batch)
 
+    def stream_hdlc_frame(self, action: callable):
+        start_time = time.time()
+        while time.time() - start_time <= self.time_before_die:
+
+            batch = self._generate_batch_as_protobuf()
+            hdlc_frame = yahdlc.frame_data(batch)
+
+            time.sleep(self.batch_cadency)
+            if (self.dryrun == False):
+                action(hdlc_frame)
+
+
 class Streamer():
     def __init__(self, args):
         self.args = args
@@ -151,13 +182,28 @@ class Streamer():
         action = Actions()
         sw = SinWave(self.args.channel, 30, self.args.dryrun)
 
-        if(self.args.operation == OPERATIONS[OP.JSON_TO_STDOUT.value]):
+        if (self.args.operation == OPERATIONS[OP.JSON_TO_STDOUT.value]):
             sw.stream_json(action.write_to_stdout)
-        elif(self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
+        elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
             sw.stream_protobuf(action.write_to_file)
-        elif(self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
-            SERIAL = serial.Serial(port=self.args.device, baudrate=115200, bytesize=8, stopbits=serial.STOPBITS_ONE, timeout=0.5)
+        elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
+            SERIAL = serial.Serial(
+                port=self.args.device,
+                baudrate=115200,
+                bytesize=8,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.5)
             sw.stream_protobuf(action.write_to_serial)
+        elif (self.args.operation == OPERATIONS[OP.HDLC_TO_FILE.value]):
+            sw.stream_hdlc_frame(action.write_to_file)
+        elif (self.args.operation == OPERATIONS[OP.HDLC_TO_SERIAL.value]):
+            SERIAL = serial.Serial(
+                port=self.args.device,
+                baudrate=115200,
+                bytesize=8,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.5)
+            sw.stream_hdlc_frame(action.write_to_serial)
 
 
 """**********
