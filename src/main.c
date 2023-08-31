@@ -49,10 +49,10 @@ struct led
  * Functions forward declaration
  ***************************************************************************************************/
 void consume_bytes(void *p1, void *p2, void *p3);
+int  init_led(const struct led *pled);
 void blink_led0(void *, void *, void *);
-void blink(const struct led *led, uint32_t sleep_ms, uint32_t id);
+void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id);
 void serial_cb_single_byte(const struct device *dev, void *user_data);
-void serial_cb_multi_byte(const struct device *dev, void *user_data);
 
 /***************************************************************************************************
  * Globals
@@ -116,10 +116,40 @@ int main(int argc, char **argv)
 /***************************************************************************************************
  * Function bodies
  ***************************************************************************************************/
+int init_led(const struct led *pled)
+{
+    const struct gpio_dt_spec *spec = &pled->spec;
+    int                        ret;
+
+    if (!device_is_ready(spec->port))
+    {
+        printk("Error: %s device is not ready\n", spec->port->name);
+        return -1;
+    }
+
+    ret = gpio_pin_configure_dt(spec, GPIO_OUTPUT);
+    if (ret != 0)
+    {
+        printk("Error %d: failed to configure pin %d\n", ret, spec->pin);
+        return ret;
+    }
+    return 0;
+}
+
 void consume_bytes(void *p1, void *p2, void *p3)
 {
     yahdlc_control_t control_recv;
-    int              rc = 0;
+    int              rc  = 0;
+    int              cnt = 0;
+
+    const struct led          *pled = &blue_led;
+    const struct gpio_dt_spec *spec = &pled->spec;
+
+    if (init_led(pled))
+    {
+        printk("Error while configuring LED\n");
+    }
+
     while (1)
     {
         // Get the data from the frame
@@ -133,6 +163,8 @@ void consume_bytes(void *p1, void *p2, void *p3)
             // DECODE PROTOBUF
 
             // ACT
+            gpio_pin_set(spec->port, spec->pin, cnt % 2);
+            cnt++;
 
             // CLEAN
             rc                  = 0;
@@ -149,23 +181,14 @@ void blink_led0(void *, void *, void *)
     blink(&green_led, 50, 0);
 }
 
-void blink(const struct led *led, uint32_t sleep_ms, uint32_t id)
+void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id)
 {
-    const struct gpio_dt_spec *spec = &led->spec;
+    const struct gpio_dt_spec *spec = &pled->spec;
     int                        cnt  = 0;
-    int                        ret;
 
-    if (!device_is_ready(spec->port))
+    if (init_led(pled))
     {
-        printk("Error: %s device is not ready\n", spec->port->name);
-        return;
-    }
-
-    ret = gpio_pin_configure_dt(spec, GPIO_OUTPUT);
-    if (ret != 0)
-    {
-        printk("Error %d: failed to configure pin %d (LED '%d')\n", ret, spec->pin, led->num);
-        return;
+        printk("Error while configuring LED\n");
     }
 
     while (1)

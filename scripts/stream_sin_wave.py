@@ -174,10 +174,20 @@ class SinWave:
 
 class Streamer():
     def __init__(self, args):
+        global SERIAL
+
         self.args = args
 
+        if(self.args.device):
+            SERIAL = serial.Serial(
+                port=self.args.device,
+                baudrate=115200,
+                bytesize=8,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.5)
+
     def stream(self):
-        global SERIAL, OPERATIONS
+        global OPERATIONS
 
         action = Actions()
         sw = SinWave(self.args.channel, 30, self.args.dryrun)
@@ -187,22 +197,10 @@ class Streamer():
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
             sw.stream_protobuf(action.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
-            SERIAL = serial.Serial(
-                port=self.args.device,
-                baudrate=115200,
-                bytesize=8,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=0.5)
             sw.stream_protobuf(action.write_to_serial)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_FILE.value]):
             sw.stream_hdlc_frame(action.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_SERIAL.value]):
-            SERIAL = serial.Serial(
-                port=self.args.device,
-                baudrate=115200,
-                bytesize=8,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=0.5)
             sw.stream_hdlc_frame(action.write_to_serial)
 
 
