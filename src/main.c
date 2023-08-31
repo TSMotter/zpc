@@ -15,26 +15,26 @@
 #include <pb_decode.h>
 #include "proto/sin_wave.pb.h"
 
+#include "external/yahdlc.h"
+
 /***************************************************************************************************
  * Defines
  ***************************************************************************************************/
 // Thread related
 #define CONSUMER_THREAD_STACK_SIZE 2048
 #define CONSUMER_THREAD_PRIO 1
-#define CONSUMER_THREAD_RAM_BUFFER_SIZE (CONSUMER_THREAD_STACK_SIZE / 4)
 #define LED_THREAD_STACK_SIZE 256
 #define LED_THREAD_PRIO 2
 
 // LED related
 #define GREEN_LED_NODE DT_NODELABEL(green_led_4)
+#define BLUE_LED_NODE DT_NODELABEL(blue_led_6)
 
 // UART related
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
-#define MSG_SIZE 32
 
-// Ringbuffer related
-#define RB_INCOMING_SIZE 1024
-
+#define UART_RX_BUFFER_SIZE 512
+#define HDLC_FRAME_BUFFER_SIZE (UART_RX_BUFFER_SIZE + 32)
 
 /***************************************************************************************************
  * Types
@@ -43,13 +43,6 @@ struct led
 {
     struct gpio_dt_spec spec;
     uint8_t             num;
-};
-
-struct printk_data_t
-{
-    void    *fifo_reserved;
-    uint32_t led;
-    uint32_t cnt;
 };
 
 /***************************************************************************************************
@@ -66,55 +59,54 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data);
  ***************************************************************************************************/
 K_THREAD_STACK_DEFINE(consumer_thread_stack, CONSUMER_THREAD_STACK_SIZE);
 K_THREAD_STACK_DEFINE(led_thread_stack, LED_THREAD_STACK_SIZE);
-K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
 
 static const struct led green_led = {.spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
                                      .num  = 0};
-
+static const struct led blue_led  = {.spec = GPIO_DT_SPEC_GET_OR(BLUE_LED_NODE, gpios, {0}),
+                                     .num  = 0};
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 
+// Buffer to receive UART ISR
+static uint8_t      uart_isr_buffer[HDLC_FRAME_BUFFER_SIZE];
+static unsigned int uart_isr_buffer_idx;
 
-uint8_t         rb_incoming_buffer[RB_INCOMING_SIZE];
-struct ring_buf rb_incoming;
-
-static struct k_sem sem_hdlc_frame;
+// Buffer to place the recovered protobuf binary payload from the HDLC frame
+static uint8_t      binary_payload_recovered_from_hdlc_buffer[UART_RX_BUFFER_SIZE];
+static unsigned int binary_payload_recovered_len;
 
 /***************************************************************************************************
  * Main
  ***************************************************************************************************/
 int main(int argc, char **argv)
 {
-    ring_buf_init(&rb_incoming, sizeof(rb_incoming_buffer), rb_incoming_buffer);
-
-    k_sem_init(&sem_hdlc_frame, 0, 1);
-
+    /* UART related */
     if (!device_is_ready(uart_dev))
     {
         printk("UART device not found!");
         return 0;
     }
-    uart_irq_callback_user_data_set(uart_dev, serial_cb_multi_byte, NULL);
+    uart_irq_callback_user_data_set(uart_dev, serial_cb_single_byte, NULL);
     uart_irq_rx_enable(uart_dev);
 
+    /* Thread related */
     static struct k_thread consumer_thread_id;
-    k_thread_create(&consumer_thread_id, consumer_thread_stack,
-                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, &rb_incoming,
-                    NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
-    k_thread_name_set(&consumer_thread_id, "consumer_thread");
-
     static struct k_thread led_thread_id;
+
+    k_thread_create(&consumer_thread_id, consumer_thread_stack,
+                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, NULL, NULL, NULL,
+                    CONSUMER_THREAD_PRIO, 0, K_FOREVER);
     k_thread_create(&led_thread_id, led_thread_stack, K_THREAD_STACK_SIZEOF(led_thread_stack),
                     &blink_led0, NULL, NULL, NULL, LED_THREAD_PRIO, 0, K_FOREVER);
-    k_thread_name_set(&led_thread_id, "led_thread");
 
+    k_thread_name_set(&consumer_thread_id, "consumer_thread");
+    k_thread_name_set(&led_thread_id, "led_thread");
 
     k_thread_start(&consumer_thread_id);
     k_thread_start(&led_thread_id);
 
-
     while (1)
     {
-        k_sleep(K_MSEC(100));
+        k_msleep(100);
     }
 
     return 0;
@@ -126,25 +118,29 @@ int main(int argc, char **argv)
  ***************************************************************************************************/
 void consume_bytes(void *p1, void *p2, void *p3)
 {
-    if (p1 == NULL)
-    {
-        return;
-    }
-
-    struct ring_buf *rb = (struct ring_buf *) p1;
-
-    uint8_t  buffer[CONSUMER_THREAD_RAM_BUFFER_SIZE];
-    uint32_t len_to_read;
-
+    yahdlc_control_t control_recv;
+    int              rc = 0;
     while (1)
     {
-        k_sem_take(&sem_hdlc_frame, K_FOREVER);
+        // Get the data from the frame
+        rc = yahdlc_get_data(&control_recv, uart_isr_buffer, uart_isr_buffer_idx,
+                             binary_payload_recovered_from_hdlc_buffer,
+                             &binary_payload_recovered_len);
 
-        len_to_read = MIN(ring_buf_space_get(rb), CONSUMER_THREAD_RAM_BUFFER_SIZE);
-        if (ring_buf_get(rb, buffer, len_to_read) == len_to_read)
+        // Success -> complete HDLC frame found -> will decode the binary payload now
+        if (rc >= 0)
         {
-            // yahdlc_get_data(...);
+            // DECODE PROTOBUF
+
+            // ACT
+
+            // CLEAN
+            rc                  = 0;
+            uart_isr_buffer_idx = 0;
+            memset(uart_isr_buffer, 0, HDLC_FRAME_BUFFER_SIZE);
+            yahdlc_get_data_reset();
         }
+        k_msleep(100);
     }
 }
 
@@ -192,65 +188,21 @@ void serial_cb_single_byte(const struct device *dev, void *user_data)
         return;
     }
 
-    static const uint8_t SOF       = 0x7E;
-    bool                 found_sof = false;
-    uint8_t              rx_byte;
+    if (uart_isr_buffer_idx >= HDLC_FRAME_BUFFER_SIZE)
+    {
+        return;
+    }
+
+    uint8_t rx_byte;
 
     /* read until FIFO empty */
     while (uart_fifo_read(uart_dev, &rx_byte, 1) == 1)
     {
-        if (rx_byte == SOF)
+        uart_isr_buffer[uart_isr_buffer_idx++] = rx_byte;
+
+        if (uart_isr_buffer_idx >= HDLC_FRAME_BUFFER_SIZE)
         {
-            if (found_sof == false)
-            {
-                found_sof = true;
-            }
-            else
-            {
-                k_sem_give(&sem_hdlc_frame);
-                found_sof = false;
-            }
-        }
-        if (found_sof == false)
-        {
-            continue;
-        }
-
-        if (!ring_buf_put(&rb_incoming, &rx_byte, 1))
-        {
-            // error
-        }
-    }
-}
-
-void serial_cb_multi_byte(const struct device *dev, void *user_data)
-{
-    ARG_UNUSED(user_data);
-
-    while (uart_irq_update(dev) && uart_irq_is_pending(dev))
-    {
-        if (uart_irq_rx_ready(dev))
-        {
-            int     recv_len, rb_len;
-            uint8_t buffer[125];
-            size_t  len = MIN(ring_buf_space_get(&rb_incoming), sizeof(buffer));
-
-            recv_len = uart_fifo_read(dev, buffer, len);
-            if (recv_len < 0)
-            {
-                // LOG_ERR("Failed to read UART FIFO");
-                recv_len = 0;
-            };
-
-            rb_len = ring_buf_put(&rb_incoming, buffer, recv_len);
-            if (rb_len < recv_len)
-            {
-                // LOG_ERR("Drop %u bytes", recv_len - rb_len);
-            }
-        }
-
-        if (uart_irq_tx_ready(dev))
-        {
+            return;
         }
     }
 }
