@@ -178,7 +178,7 @@ class Streamer():
 
         self.args = args
 
-        if(self.args.device):
+        if (self.args.device):
             SERIAL = serial.Serial(
                 port=self.args.device,
                 baudrate=115200,

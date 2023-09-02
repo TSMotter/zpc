@@ -53,12 +53,15 @@ int  init_led(const struct led *pled);
 void blink_led0(void *, void *, void *);
 void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id);
 void serial_cb_single_byte(const struct device *dev, void *user_data);
+void serial_cb_multi_byte(const struct device *dev, void *user_data);
+void timer_callback(struct k_timer *dummy);
 
 /***************************************************************************************************
  * Globals
  ***************************************************************************************************/
 K_THREAD_STACK_DEFINE(consumer_thread_stack, CONSUMER_THREAD_STACK_SIZE);
 K_THREAD_STACK_DEFINE(led_thread_stack, LED_THREAD_STACK_SIZE);
+K_TIMER_DEFINE(tim_uart_isr_inactivity, timer_callback, NULL);
 
 static const struct led green_led = {.spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
                                      .num  = 0};
@@ -74,6 +77,9 @@ static unsigned int uart_isr_buffer_idx;
 static uint8_t      binary_payload_recovered_from_hdlc_buffer[UART_RX_BUFFER_SIZE];
 static unsigned int binary_payload_recovered_len;
 
+static struct k_sem sem_uart_isr_inactivity;
+
+
 /***************************************************************************************************
  * Main
  ***************************************************************************************************/
@@ -85,8 +91,10 @@ int main(int argc, char **argv)
         printk("UART device not found!");
         return 0;
     }
-    uart_irq_callback_user_data_set(uart_dev, serial_cb_single_byte, NULL);
+    uart_irq_callback_user_data_set(uart_dev, serial_cb_multi_byte, NULL);
     uart_irq_rx_enable(uart_dev);
+
+    k_sem_init(&sem_uart_isr_inactivity, 0, 1);
 
     /* Thread related */
     static struct k_thread consumer_thread_id;
@@ -152,6 +160,8 @@ void consume_bytes(void *p1, void *p2, void *p3)
 
     while (1)
     {
+        k_sem_take(&sem_uart_isr_inactivity, K_FOREVER);
+
         // Get the data from the frame
         rc = yahdlc_get_data(&control_recv, uart_isr_buffer, uart_isr_buffer_idx,
                              binary_payload_recovered_from_hdlc_buffer,
@@ -165,14 +175,13 @@ void consume_bytes(void *p1, void *p2, void *p3)
             // ACT
             gpio_pin_set(spec->port, spec->pin, cnt % 2);
             cnt++;
-
-            // CLEAN
-            rc                  = 0;
-            uart_isr_buffer_idx = 0;
-            memset(uart_isr_buffer, 0, HDLC_FRAME_BUFFER_SIZE);
-            yahdlc_get_data_reset();
         }
-        k_msleep(100);
+
+        // CLEAN
+        rc                  = 0;
+        uart_isr_buffer_idx = 0;
+        memset(uart_isr_buffer, 0, HDLC_FRAME_BUFFER_SIZE);
+        yahdlc_get_data_reset();
     }
 }
 
@@ -228,4 +237,40 @@ void serial_cb_single_byte(const struct device *dev, void *user_data)
             return;
         }
     }
+}
+
+void serial_cb_multi_byte(const struct device *dev, void *user_data)
+{
+    ARG_UNUSED(user_data);
+
+    while (uart_irq_update(dev) && uart_irq_is_pending(dev))
+    {
+        if (uart_irq_rx_ready(dev))
+        {
+            int    actual_length_read;
+            size_t space_available = HDLC_FRAME_BUFFER_SIZE - uart_isr_buffer_idx;
+
+            actual_length_read =
+                uart_fifo_read(dev, &uart_isr_buffer[uart_isr_buffer_idx], space_available);
+            if (actual_length_read < 0)
+            {
+                // LOG_ERR("Failed to read UART FIFO");
+                actual_length_read = 0;
+            }
+            uart_isr_buffer_idx += actual_length_read;
+
+            /* (re)start a one shot timer that'll expire indicating USART inactivity to let
+            the received data to be processed */
+            k_timer_start(&tim_uart_isr_inactivity, K_MSEC(10), K_NO_WAIT);
+        }
+
+        if (uart_irq_tx_ready(dev))
+        {
+        }
+    }
+}
+
+void timer_callback(struct k_timer *dummy)
+{
+    k_sem_give(&sem_uart_isr_inactivity);
 }
