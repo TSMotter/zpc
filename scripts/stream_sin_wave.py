@@ -45,7 +45,7 @@ class Actions:
         SERIAL.write(batch)
 
 
-class SinWave:
+class SinWaveGenerator:
     def __init__(self, ch, tbd, dry):
         # Class members
         self.samples_in_each_sin_cycle = None
@@ -189,19 +189,19 @@ class Streamer():
     def stream(self):
         global OPERATIONS
 
-        action = Actions()
-        sw = SinWave(self.args.channel, 30, self.args.dryrun)
+        a = Actions()
+        sw = SinWaveGenerator(self.args.channel, 30, self.args.dryrun)
 
         if (self.args.operation == OPERATIONS[OP.JSON_TO_STDOUT.value]):
-            sw.stream_json(action.write_to_stdout)
+            sw.stream_json(a.write_to_stdout)
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
-            sw.stream_protobuf(action.write_to_file)
+            sw.stream_protobuf(a.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
-            sw.stream_protobuf(action.write_to_serial)
+            sw.stream_protobuf(a.write_to_serial)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_FILE.value]):
-            sw.stream_hdlc_frame(action.write_to_file)
+            sw.stream_hdlc_frame(a.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_SERIAL.value]):
-            sw.stream_hdlc_frame(action.write_to_serial)
+            sw.stream_hdlc_frame(a.write_to_serial)
 
 
 """**********
@@ -209,7 +209,6 @@ class Streamer():
 **********"""
 if __name__ == '__main__':
     try:
-        serial_error = 1
         parser = argparse.ArgumentParser(
             description='Streams samples of a sin wave based on the channel parameter',
             epilog='No epilog')

@@ -28,6 +28,7 @@
 
 // LED related
 #define GREEN_LED_NODE DT_NODELABEL(green_led_4)
+//#define RED_LED_NODE DT_NODELABEL(red_led_5)
 #define BLUE_LED_NODE DT_NODELABEL(blue_led_6)
 
 // UART related
@@ -37,21 +38,12 @@
 #define HDLC_FRAME_BUFFER_SIZE (UART_RX_BUFFER_SIZE + 32)
 
 /***************************************************************************************************
- * Types
- ***************************************************************************************************/
-struct led
-{
-    struct gpio_dt_spec spec;
-    uint8_t             num;
-};
-
-/***************************************************************************************************
  * Functions forward declaration
  ***************************************************************************************************/
 void consume_bytes(void *p1, void *p2, void *p3);
-int  init_led(const struct led *pled);
+int  init_led(const struct gpio_dt_spec *pled);
 void blink_led0(void *, void *, void *);
-void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id);
+void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id);
 void serial_cb_single_byte(const struct device *dev, void *user_data);
 void serial_cb_multi_byte(const struct device *dev, void *user_data);
 void timer_callback(struct k_timer *dummy);
@@ -61,12 +53,13 @@ void timer_callback(struct k_timer *dummy);
  ***************************************************************************************************/
 K_THREAD_STACK_DEFINE(consumer_thread_stack, CONSUMER_THREAD_STACK_SIZE);
 K_THREAD_STACK_DEFINE(led_thread_stack, LED_THREAD_STACK_SIZE);
-K_TIMER_DEFINE(tim_uart_isr_inactivity, timer_callback, NULL);
 
-static const struct led green_led = {.spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0}),
-                                     .num  = 0};
-static const struct led blue_led  = {.spec = GPIO_DT_SPEC_GET_OR(BLUE_LED_NODE, gpios, {0}),
-                                     .num  = 0};
+/* clang-format off */
+static const struct gpio_dt_spec led_green_dt_spec = GPIO_DT_SPEC_GET_OR(GREEN_LED_NODE, gpios, {0});
+//static const struct gpio_dt_spec led_red_dt_spec   = GPIO_DT_SPEC_GET_OR(RED_LED_NODE, gpios, {0});
+static const struct gpio_dt_spec led_blue_dt_spec  = GPIO_DT_SPEC_GET_OR(BLUE_LED_NODE, gpios, {0});
+/* clang-format on */
+
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 
 // Buffer to receive UART ISR
@@ -77,8 +70,9 @@ static unsigned int uart_isr_buffer_idx;
 static uint8_t      binary_payload_recovered_from_hdlc_buffer[UART_RX_BUFFER_SIZE];
 static unsigned int binary_payload_recovered_len;
 
+// Timer and semaphore for synchronization
+K_TIMER_DEFINE(tim_uart_isr_inactivity, timer_callback, NULL);
 static struct k_sem sem_uart_isr_inactivity;
-
 
 /***************************************************************************************************
  * Main
@@ -95,6 +89,12 @@ int main(int argc, char **argv)
     uart_irq_rx_enable(uart_dev);
 
     k_sem_init(&sem_uart_isr_inactivity, 0, 1);
+
+    // const struct gpio_dt_spec *p_spec = &led_red_dt_spec;
+    // if (init_led(p_spec))
+    //{
+    //     printk("Error while configuring LED\n");
+    // }
 
     /* Thread related */
     static struct k_thread consumer_thread_id;
@@ -124,21 +124,20 @@ int main(int argc, char **argv)
 /***************************************************************************************************
  * Function bodies
  ***************************************************************************************************/
-int init_led(const struct led *pled)
+int init_led(const struct gpio_dt_spec *pled)
 {
-    const struct gpio_dt_spec *spec = &pled->spec;
-    int                        ret;
+    int ret;
 
-    if (!device_is_ready(spec->port))
+    if (!device_is_ready(pled->port))
     {
-        printk("Error: %s device is not ready\n", spec->port->name);
+        printk("Error: %s device is not ready\n", pled->port->name);
         return -1;
     }
 
-    ret = gpio_pin_configure_dt(spec, GPIO_OUTPUT);
+    ret = gpio_pin_configure_dt(pled, GPIO_OUTPUT);
     if (ret != 0)
     {
-        printk("Error %d: failed to configure pin %d\n", ret, spec->pin);
+        printk("Error %d: failed to configure pin %d\n", ret, pled->pin);
         return ret;
     }
     return 0;
@@ -146,14 +145,12 @@ int init_led(const struct led *pled)
 
 void consume_bytes(void *p1, void *p2, void *p3)
 {
-    yahdlc_control_t control_recv;
-    int              rc  = 0;
-    int              cnt = 0;
+    yahdlc_control_t           control_recv;
+    int                        rc     = 0;
+    int                        cnt    = 0;
+    const struct gpio_dt_spec *p_spec = &led_blue_dt_spec;
 
-    const struct led          *pled = &blue_led;
-    const struct gpio_dt_spec *spec = &pled->spec;
-
-    if (init_led(pled))
+    if (init_led(p_spec))
     {
         printk("Error while configuring LED\n");
     }
@@ -173,7 +170,7 @@ void consume_bytes(void *p1, void *p2, void *p3)
             // DECODE PROTOBUF
 
             // ACT
-            gpio_pin_set(spec->port, spec->pin, cnt % 2);
+            gpio_pin_set(p_spec->port, p_spec->pin, cnt % 2);
             cnt++;
         }
 
@@ -187,13 +184,13 @@ void consume_bytes(void *p1, void *p2, void *p3)
 
 void blink_led0(void *, void *, void *)
 {
-    blink(&green_led, 50, 0);
+    const struct gpio_dt_spec *p_spec = &led_green_dt_spec;
+    blink(p_spec, 50, 0);
 }
 
-void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id)
+void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id)
 {
-    const struct gpio_dt_spec *spec = &pled->spec;
-    int                        cnt  = 0;
+    int cnt = 0;
 
     if (init_led(pled))
     {
@@ -202,7 +199,7 @@ void blink(const struct led *pled, uint32_t sleep_ms, uint32_t id)
 
     while (1)
     {
-        gpio_pin_set(spec->port, spec->pin, cnt % 2);
+        gpio_pin_set(pled->port, pled->pin, cnt % 2);
         k_msleep(sleep_ms);
         cnt++;
     }
@@ -272,5 +269,10 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data)
 
 void timer_callback(struct k_timer *dummy)
 {
+    // static const struct gpio_dt_spec *p_spec = &led_red_dt_spec;
+    // static int                        cnt    = 0;
+
     k_sem_give(&sem_uart_isr_inactivity);
+    // gpio_pin_set(p_spec->port, p_spec->pin, cnt % 2);
+    // cnt++;
 }
