@@ -8,7 +8,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/kernel/thread_stack.h>
 #include <zephyr/sys/printk.h>
-#include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/util.h>
 
 #include <pb_encode.h>
@@ -28,25 +27,29 @@
 
 // LED related
 #define GREEN_LED_NODE DT_NODELABEL(green_led_4)
-//#define RED_LED_NODE DT_NODELABEL(red_led_5)
+// #define RED_LED_NODE DT_NODELABEL(red_led_5)
 #define BLUE_LED_NODE DT_NODELABEL(blue_led_6)
 
 // UART related
 #define UART_DEVICE_NODE DT_CHOSEN(zephyr_shell_uart)
-
 #define UART_RX_BUFFER_SIZE 512
-#define HDLC_FRAME_BUFFER_SIZE (UART_RX_BUFFER_SIZE + 32)
 
 /***************************************************************************************************
  * Functions forward declaration
  ***************************************************************************************************/
-void consume_bytes(void *p1, void *p2, void *p3);
+/* clang-format off */
 int  init_led(const struct gpio_dt_spec *pled);
-void blink_led0(void *, void *, void *);
+
+void consume_bytes(void *p1, void *p2, void *p3);
+void blink_led0(void *p1, void *p2, void *p3);
 void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id);
-void serial_cb_single_byte(const struct device *dev, void *user_data);
+
 void serial_cb_multi_byte(const struct device *dev, void *user_data);
+
 void timer_callback(struct k_timer *dummy);
+
+static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_field_iter_t *field, void **arg);
+/* clang-format on */
 
 /***************************************************************************************************
  * Globals
@@ -63,7 +66,7 @@ static const struct gpio_dt_spec led_blue_dt_spec  = GPIO_DT_SPEC_GET_OR(BLUE_LE
 static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 
 // Buffer to receive UART ISR
-static uint8_t      uart_isr_buffer[HDLC_FRAME_BUFFER_SIZE];
+static uint8_t      uart_isr_buffer[UART_RX_BUFFER_SIZE];
 static unsigned int uart_isr_buffer_idx;
 
 // Buffer to place the recovered protobuf binary payload from the HDLC frame
@@ -73,6 +76,9 @@ static unsigned int binary_payload_recovered_len;
 // Timer and semaphore for synchronization
 K_TIMER_DEFINE(tim_uart_isr_inactivity, timer_callback, NULL);
 static struct k_sem sem_uart_isr_inactivity;
+
+/* queue to store up to 10 messages (aligned to 4-byte boundary) */
+K_MSGQ_DEFINE(samples_msgq, sizeof(Batch), 5, 4);
 
 /***************************************************************************************************
  * Main
@@ -90,19 +96,13 @@ int main(int argc, char **argv)
 
     k_sem_init(&sem_uart_isr_inactivity, 0, 1);
 
-    // const struct gpio_dt_spec *p_spec = &led_red_dt_spec;
-    // if (init_led(p_spec))
-    //{
-    //     printk("Error while configuring LED\n");
-    // }
-
     /* Thread related */
     static struct k_thread consumer_thread_id;
     static struct k_thread led_thread_id;
 
     k_thread_create(&consumer_thread_id, consumer_thread_stack,
-                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, NULL, NULL, NULL,
-                    CONSUMER_THREAD_PRIO, 0, K_FOREVER);
+                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, &samples_msgq,
+                    NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
     k_thread_create(&led_thread_id, led_thread_stack, K_THREAD_STACK_SIZEOF(led_thread_stack),
                     &blink_led0, NULL, NULL, NULL, LED_THREAD_PRIO, 0, K_FOREVER);
 
@@ -145,12 +145,16 @@ int init_led(const struct gpio_dt_spec *pled)
 
 void consume_bytes(void *p1, void *p2, void *p3)
 {
-    yahdlc_control_t           control_recv;
-    int                        rc     = 0;
-    int                        cnt    = 0;
-    const struct gpio_dt_spec *p_spec = &led_blue_dt_spec;
+    yahdlc_control_t control_recv;
 
-    if (init_led(p_spec))
+    const struct gpio_dt_spec *pled = &led_blue_dt_spec;
+    struct k_msgq             *msgq = (struct k_msgq *) p1;
+
+    Batch batch_d = {.items.arg = msgq, .items.funcs.decode = &custom_repeated_decoding_callback};
+    pb_istream_t iStream = pb_istream_from_buffer(binary_payload_recovered_from_hdlc_buffer,
+                                                  binary_payload_recovered_len);
+
+    if (init_led(pled))
     {
         printk("Error while configuring LED\n");
     }
@@ -159,33 +163,49 @@ void consume_bytes(void *p1, void *p2, void *p3)
     {
         k_sem_take(&sem_uart_isr_inactivity, K_FOREVER);
 
-        // Get the data from the frame
-        rc = yahdlc_get_data(&control_recv, uart_isr_buffer, uart_isr_buffer_idx,
-                             binary_payload_recovered_from_hdlc_buffer,
-                             &binary_payload_recovered_len);
+        // Extract payload from frame
+        int rc = yahdlc_get_data(&control_recv, uart_isr_buffer, uart_isr_buffer_idx,
+                                 binary_payload_recovered_from_hdlc_buffer,
+                                 &binary_payload_recovered_len);
 
-        // Success -> complete HDLC frame found -> will decode the binary payload now
+        // Success -> complete HDLC frame found -> will decode the binary payload
         if (rc >= 0)
         {
-            // DECODE PROTOBUF
+            // Decode payload
+            if (!pb_decode(&iStream, Batch_fields, &batch_d))
+            {
+                // LOG_ERR("Decoding failed: %s\n", PB_GET_ERROR(&iStream));
+                //  continue;
+            }
 
-            // ACT
-            gpio_pin_set(p_spec->port, p_spec->pin, cnt % 2);
-            cnt++;
+            // Take some action based on the payload value
+            while (k_msgq_num_used_get(msgq))
+            {
+                Batch_Sample sample_d = {};
+                k_msgq_get(msgq, &sample_d, K_NO_WAIT);
+
+                /* ACT based on sample value
+                Ex:
+                    change pwm duty cycle
+                    draw on display
+                    etc
+                */
+            }
         }
 
-        // CLEAN
-        rc                  = 0;
-        uart_isr_buffer_idx = 0;
-        memset(uart_isr_buffer, 0, HDLC_FRAME_BUFFER_SIZE);
+        // Cleanup
+        memset(binary_payload_recovered_from_hdlc_buffer, 0, binary_payload_recovered_len);
+        memset(uart_isr_buffer, 0, uart_isr_buffer_idx);
+        uart_isr_buffer_idx          = 0;
+        binary_payload_recovered_len = 0;
         yahdlc_get_data_reset();
     }
 }
 
-void blink_led0(void *, void *, void *)
+void blink_led0(void *p1, void *p2, void *p3)
 {
-    const struct gpio_dt_spec *p_spec = &led_green_dt_spec;
-    blink(p_spec, 50, 0);
+    const struct gpio_dt_spec *pled = &led_green_dt_spec;
+    blink(pled, 50, 0);
 }
 
 void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id)
@@ -205,37 +225,6 @@ void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id)
     }
 }
 
-void serial_cb_single_byte(const struct device *dev, void *user_data)
-{
-    if (!uart_irq_update(uart_dev))
-    {
-        return;
-    }
-
-    if (!uart_irq_rx_ready(uart_dev))
-    {
-        return;
-    }
-
-    if (uart_isr_buffer_idx >= HDLC_FRAME_BUFFER_SIZE)
-    {
-        return;
-    }
-
-    uint8_t rx_byte;
-
-    /* read until FIFO empty */
-    while (uart_fifo_read(uart_dev, &rx_byte, 1) == 1)
-    {
-        uart_isr_buffer[uart_isr_buffer_idx++] = rx_byte;
-
-        if (uart_isr_buffer_idx >= HDLC_FRAME_BUFFER_SIZE)
-        {
-            return;
-        }
-    }
-}
-
 void serial_cb_multi_byte(const struct device *dev, void *user_data)
 {
     ARG_UNUSED(user_data);
@@ -245,7 +234,7 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data)
         if (uart_irq_rx_ready(dev))
         {
             int    actual_length_read;
-            size_t space_available = HDLC_FRAME_BUFFER_SIZE - uart_isr_buffer_idx;
+            size_t space_available = UART_RX_BUFFER_SIZE - uart_isr_buffer_idx;
 
             actual_length_read =
                 uart_fifo_read(dev, &uart_isr_buffer[uart_isr_buffer_idx], space_available);
@@ -269,10 +258,28 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data)
 
 void timer_callback(struct k_timer *dummy)
 {
-    // static const struct gpio_dt_spec *p_spec = &led_red_dt_spec;
-    // static int                        cnt    = 0;
-
     k_sem_give(&sem_uart_isr_inactivity);
-    // gpio_pin_set(p_spec->port, p_spec->pin, cnt % 2);
-    // cnt++;
+}
+
+static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_field_iter_t *field,
+                                              void **arg)
+{
+    printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
+
+    struct k_msgq *msgq = (struct k_msgq *) *arg;
+
+    if (stream != NULL && field->tag == Batch_items_tag)
+    {
+        Batch_Sample sample_d = Batch_Sample_init_zero;
+
+        if (!pb_decode(stream, Batch_Sample_fields, &sample_d))
+        {
+            printk("Decoding failed: %s\n", PB_GET_ERROR(stream));
+            return 1;
+        }
+
+        k_msgq_put(msgq, &sample_d, K_NO_WAIT);
+    }
+
+    return true;
 }
