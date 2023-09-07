@@ -43,7 +43,7 @@
 int  init_led(const struct gpio_dt_spec *pled);
 
 void consume_bytes(void *p1, void *p2, void *p3);
-void act_on_pwm_dc(double value);
+void act_on_pwm_dc(double sample_value);
 void blink_led0(void *p1, void *p2, void *p3);
 void blink(const struct gpio_dt_spec *pled, uint32_t sleep_ms, uint32_t id);
 
@@ -103,6 +103,11 @@ int main(int argc, char **argv)
     {
         // printk("Error: PWM device %s is not ready\n", led_pwm_orange_dt_spec.dev->name);
         return 0;
+    }
+
+    if (init_led(&led_blue_dt_spec))
+    {
+        printk("Error while configuring LED\n");
     }
 
     /* Thread related */
@@ -170,17 +175,7 @@ void consume_bytes(void *p1, void *p2, void *p3)
 {
     yahdlc_control_t control_recv;
 
-    const struct gpio_dt_spec *pled = &led_blue_dt_spec;
-    struct k_msgq             *msgq = (struct k_msgq *) p1;
-
-    Batch batch_d = {.items.arg = msgq, .items.funcs.decode = &custom_repeated_decoding_callback};
-    pb_istream_t iStream = pb_istream_from_buffer(binary_payload_recovered_from_hdlc_buffer,
-                                                  binary_payload_recovered_len);
-
-    if (init_led(pled))
-    {
-        printk("Error while configuring LED\n");
-    }
+    struct k_msgq *msgq = (struct k_msgq *) p1;
 
     while (1)
     {
@@ -194,6 +189,11 @@ void consume_bytes(void *p1, void *p2, void *p3)
         // Success -> complete HDLC frame found -> will decode the binary payload
         if (rc >= 0)
         {
+            Batch        batch_d = {.items.arg          = msgq,
+                                    .items.funcs.decode = &custom_repeated_decoding_callback};
+            pb_istream_t iStream = pb_istream_from_buffer(binary_payload_recovered_from_hdlc_buffer,
+                                                          binary_payload_recovered_len);
+
             // Decode payload
             if (!pb_decode(&iStream, Batch_fields, &batch_d))
             {
@@ -205,15 +205,11 @@ void consume_bytes(void *p1, void *p2, void *p3)
             while (k_msgq_num_used_get(msgq))
             {
                 Batch_Sample sample_d = {};
-                k_msgq_get(msgq, &sample_d, K_NO_WAIT);
-
-                /* ACT based on sample value
-                Ex:
-                    change pwm duty cycle
-                    draw on display
-                    etc
-                */
-                act_on_pwm_dc(sample_d.value);
+                if (!k_msgq_get(msgq, &sample_d, K_NO_WAIT))
+                {
+                    // change pwm duty cycle, draw on display, etc
+                    // act_on_pwm_dc(sample_d.value);
+                }
             }
         }
 
@@ -229,14 +225,21 @@ void consume_bytes(void *p1, void *p2, void *p3)
 /**
  * @brief
  *
- * @param value
+ * @param sample_value
  */
-void act_on_pwm_dc(double value)
+void act_on_pwm_dc(double sample_value)
 {
-    static const uint32_t scale       = 50;
-    uint32_t              pulse_width = (uint32_t) ((value * scale) + scale);
+    // output = ((input*scale) + scale)
+    // input = [-1 : 1]
+    // output = [0: 100] -> will represent the duty cycle
+    static const uint16_t scale  = 50;
+    static const uint32_t period = led_pwm_orange_dt_spec.period;
+    static const uint32_t factor = ((scale * period) / 100);
 
-    pwm_set_pulse_dt(&led_pwm_orange_dt_spec, pulse_width);
+
+    double pulse = (double) ((sample_value * factor) + factor);
+
+    pwm_set_pulse_dt(&led_pwm_orange_dt_spec, (uint32_t) pulse);
 }
 
 /**
@@ -335,7 +338,7 @@ void timer_callback(struct k_timer *dummy)
 static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_field_iter_t *field,
                                               void **arg)
 {
-    printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
+    // printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
 
     struct k_msgq *msgq = (struct k_msgq *) *arg;
 
@@ -345,7 +348,7 @@ static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_fie
 
         if (!pb_decode(stream, Batch_Sample_fields, &sample_d))
         {
-            printk("Decoding failed: %s\n", PB_GET_ERROR(stream));
+            // printk("Decoding failed: %s\n", PB_GET_ERROR(stream));
             return false;
         }
 

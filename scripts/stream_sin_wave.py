@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 import json
 import logging
@@ -172,6 +173,16 @@ class SinWaveGenerator:
                 action(hdlc_frame)
 
 
+# Function to listen for incoming bytes
+def serial_listener():
+    global SERIAL
+    while True:
+        incoming_byte = SERIAL.read_all()
+        if incoming_byte:
+            # Print the byte in hexadecimal format
+            print(f"Read: {incoming_byte.hex()}")
+
+
 class Streamer():
     def __init__(self, args):
         global SERIAL
@@ -185,6 +196,10 @@ class Streamer():
                 bytesize=8,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=0.5)
+
+            serial_thread = threading.Thread(target=serial_listener)
+            serial_thread.daemon = True
+            serial_thread.start()
 
     def stream(self):
         global OPERATIONS
