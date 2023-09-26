@@ -7,6 +7,8 @@ import argparse
 import serial
 from enum import Enum, auto
 import yahdlc
+import asyncio
+from websockets.server import serve
 
 import sin_wave_pb2
 
@@ -17,6 +19,7 @@ class OP(Enum):
     PROTOBUF_TO_SERIAL = auto()
     HDLC_TO_FILE = auto()
     HDLC_TO_SERIAL = auto()
+    JSON_TO_WEBSOCKET = auto()
 
 
 OPERATIONS = [
@@ -24,7 +27,8 @@ OPERATIONS = [
     "PROTOBUF_TO_FILE",
     "PROTOBUF_TO_SERIAL",
     "HDLC_TO_FILE",
-    "HDLC_TO_SERIAL"]
+    "HDLC_TO_SERIAL",
+    "JSON_TO_WEBSOCKET"]
 SERIAL = None
 
 
@@ -43,7 +47,12 @@ class Actions:
             f.write(batch)
 
     def write_to_serial(self, batch):
+        global SERIAL
         SERIAL.write(batch)
+
+    async def websocket_main(self, handler):
+        async with serve(handler, "localhost", 8765):
+            await asyncio.Future()
 
 
 class SinWaveGenerator:
@@ -141,6 +150,20 @@ class SinWaveGenerator:
 
         return batch_serializer.SerializeToString()
 
+    # coroutine to stream json
+    async def stream_json_coro(self, websocket):
+        start_time = time.time()
+        try:
+            while time.time() - start_time <= self.time_before_die:
+                batch = self._generate_batch_as_json()
+                await asyncio.sleep(self.batch_cadency)
+                await websocket.send(batch)
+        except Exception as e:
+            logging.info(f"Caught websocket exception {e}")
+            websocket.close()
+            await asyncio.sleep(2)
+            self.overall_samples_cntr = 0
+
     def stream_json(self, action: callable):
         start_time = time.time()
         while time.time() - start_time <= self.time_before_die:
@@ -173,16 +196,6 @@ class SinWaveGenerator:
                 action(hdlc_frame)
 
 
-# Function to listen for incoming bytes
-def serial_listener():
-    global SERIAL
-    while True:
-        incoming_byte = SERIAL.read_all()
-        if incoming_byte:
-            # Print the byte in hexadecimal format
-            print(f"Read: {incoming_byte.hex()}")
-
-
 class Streamer():
     def __init__(self, args):
         global SERIAL
@@ -197,26 +210,35 @@ class Streamer():
                 stopbits=serial.STOPBITS_ONE,
                 timeout=0.5)
 
-            serial_thread = threading.Thread(target=serial_listener)
+            def serial_listener_thread():
+                global SERIAL
+                while True:
+                    incoming_bytes = SERIAL.read_all()
+                    if incoming_bytes:
+                        logging.debug(f"Read: {incoming_bytes.hex()}")
+
+            serial_thread = threading.Thread(target=serial_listener_thread)
             serial_thread.daemon = True
             serial_thread.start()
+
+        self.act = Actions()
+        self.swg = SinWaveGenerator(self.args.channel, 30, self.args.dryrun)
 
     def stream(self):
         global OPERATIONS
 
-        a = Actions()
-        sw = SinWaveGenerator(self.args.channel, 30, self.args.dryrun)
-
         if (self.args.operation == OPERATIONS[OP.JSON_TO_STDOUT.value]):
-            sw.stream_json(a.write_to_stdout)
+            self.swg.stream_json(self.act.write_to_stdout)
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_FILE.value]):
-            sw.stream_protobuf(a.write_to_file)
+            self.swg.stream_protobuf(self.act.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.PROTOBUF_TO_SERIAL.value]):
-            sw.stream_protobuf(a.write_to_serial)
+            self.swg.stream_protobuf(self.act.write_to_serial)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_FILE.value]):
-            sw.stream_hdlc_frame(a.write_to_file)
+            self.swg.stream_hdlc_frame(self.act.write_to_file)
         elif (self.args.operation == OPERATIONS[OP.HDLC_TO_SERIAL.value]):
-            sw.stream_hdlc_frame(a.write_to_serial)
+            self.swg.stream_hdlc_frame(self.act.write_to_serial)
+        elif (self.args.operation == OPERATIONS[OP.JSON_TO_WEBSOCKET.value]):
+            asyncio.run(self.act.websocket_main(self.swg.stream_json_coro))
 
 
 """**********
