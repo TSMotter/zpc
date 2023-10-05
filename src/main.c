@@ -80,8 +80,7 @@ static unsigned int binary_payload_recovered_len;
 K_TIMER_DEFINE(tim_uart_isr_inactivity, timer_callback, NULL);
 static struct k_sem sem_uart_isr_inactivity;
 
-/* queue to store up to 10 messages (aligned to 4-byte boundary) */
-K_MSGQ_DEFINE(samples_msgq, sizeof(Batch), 5, 4);
+K_MSGQ_DEFINE(samples_msgq, sizeof(Batch_Sample), 30, 4);
 
 /***************************************************************************************************
  * Main
@@ -115,8 +114,8 @@ int main(int argc, char **argv)
     static struct k_thread led_thread_id;
 
     k_thread_create(&consumer_thread_id, consumer_thread_stack,
-                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes, &samples_msgq,
-                    NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
+                    K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes,
+                    (void *) &samples_msgq, NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
     k_thread_create(&led_thread_id, led_thread_stack, K_THREAD_STACK_SIZEOF(led_thread_stack),
                     &blink_led0, NULL, NULL, NULL, LED_THREAD_PRIO, 0, K_FOREVER);
 
@@ -175,7 +174,7 @@ void consume_bytes(void *p1, void *p2, void *p3)
 {
     yahdlc_control_t control_recv;
 
-    struct k_msgq *msgq = (struct k_msgq *) p1;
+    struct k_msgq *pmsgq = (struct k_msgq *) p1;
 
     while (1)
     {
@@ -189,7 +188,7 @@ void consume_bytes(void *p1, void *p2, void *p3)
         // Success -> complete HDLC frame found -> will decode the binary payload
         if (rc >= 0)
         {
-            Batch        batch_d = {.items.arg          = msgq,
+            Batch        batch_d = {.items.arg          = pmsgq,
                                     .items.funcs.decode = &custom_repeated_decoding_callback};
             pb_istream_t iStream = pb_istream_from_buffer(binary_payload_recovered_from_hdlc_buffer,
                                                           binary_payload_recovered_len);
@@ -198,17 +197,17 @@ void consume_bytes(void *p1, void *p2, void *p3)
             if (!pb_decode(&iStream, Batch_fields, &batch_d))
             {
                 // LOG_ERR("Decoding failed: %s\n", PB_GET_ERROR(&iStream));
-                //  continue;
+                continue;
             }
 
             // Take some action based on the payload value
-            while (k_msgq_num_used_get(msgq))
+            while (k_msgq_num_used_get(pmsgq))
             {
                 Batch_Sample sample_d = {};
-                if (!k_msgq_get(msgq, &sample_d, K_NO_WAIT))
+                if (!k_msgq_get(pmsgq, &sample_d, K_NO_WAIT))
                 {
                     // change pwm duty cycle, draw on display, etc
-                    // act_on_pwm_dc(sample_d.value);
+                    act_on_pwm_dc(sample_d.value);
                 }
             }
         }
@@ -229,13 +228,17 @@ void consume_bytes(void *p1, void *p2, void *p3)
  */
 void act_on_pwm_dc(double sample_value)
 {
-    // output = ((input*scale) + scale)
-    // input = [-1 : 1]
-    // output = [0: 100] -> will represent the duty cycle
-    static const uint16_t scale  = 50;
+    /*
+    - Considering the following formula to transpose the input value:
+        - output = ((input*factor) + factor)
+    - Considering the following input range:
+        - input = [-1 : 1]
+    - This will be the output range:
+        - output = [0 : pwm.period]
+        - This will represent the duty cycle
+    */
     static const uint32_t period = led_pwm_orange_dt_spec.period;
-    static const uint32_t factor = ((scale * period) / 100);
-
+    static const uint32_t factor = ((period) / 2);
 
     double pulse = (double) ((sample_value * factor) + factor);
 
@@ -252,7 +255,7 @@ void act_on_pwm_dc(double sample_value)
 void blink_led0(void *p1, void *p2, void *p3)
 {
     const struct gpio_dt_spec *pled = &led_green_dt_spec;
-    blink(pled, 50, 0);
+    blink(pled, 200, 0);
 }
 
 /**
@@ -305,9 +308,17 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data)
             }
             uart_isr_buffer_idx += actual_length_read;
 
-            /* (re)start a one shot timer that'll expire indicating USART inactivity to let
-            the received data to be processed */
-            k_timer_start(&tim_uart_isr_inactivity, K_MSEC(10), K_NO_WAIT);
+            /*
+            (re)start a one shot timer that'll expire indicating USART inactivity to let
+            the received data to be processed
+
+            - A good dimensioning of this timer is crucial for the responsiveness of this application
+
+            - UART baud is 115200 bits per second
+            - There are 10 bits in each byte (considering start/stop bits)
+            - This means there is one new byte being received every aprox 87us
+            */
+            k_timer_start(&tim_uart_isr_inactivity, K_MSEC(5), K_NO_WAIT);
         }
 
         if (uart_irq_tx_ready(dev))
@@ -340,7 +351,7 @@ static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_fie
 {
     // printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
 
-    struct k_msgq *msgq = (struct k_msgq *) *arg;
+    struct k_msgq *pmsgq = (struct k_msgq *) *arg;
 
     if (stream != NULL && field->tag == Batch_items_tag)
     {
@@ -352,7 +363,7 @@ static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_fie
             return false;
         }
 
-        k_msgq_put(msgq, &sample_d, K_NO_WAIT);
+        k_msgq_put(pmsgq, &sample_d, K_NO_WAIT);
     }
 
     return true;

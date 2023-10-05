@@ -213,9 +213,11 @@ class Streamer():
             def serial_listener_thread():
                 global SERIAL
                 while True:
-                    incoming_bytes = SERIAL.read_all()
+                    incoming_bytes = SERIAL.read(SERIAL.in_waiting)
                     if incoming_bytes:
                         logging.debug(f"Read: {incoming_bytes.hex()}")
+                        incoming_bytes = None
+                    time.sleep(0.1)
 
             serial_thread = threading.Thread(target=serial_listener_thread)
             serial_thread.daemon = True
