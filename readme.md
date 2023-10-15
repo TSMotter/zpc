@@ -1,19 +1,23 @@
 # Zephyr producer consumer with threads
 
-- This is a Zephyr RTOS application in freestanding topology that implements a producer / consumer concept
-- This project was developed using `STM32F407 Discovery` development kit but it should be able to run in other targets, since there is no "special" feature being used
+- This is a Zephyr workspace application.
+- This app implements the producer / consumer concept.
+- This project was developed using `STM32F407 Discovery` development kit but it should be able to run in other targets, since there are only common features being used like LED, GPIO, PWM, timer, Serial (UART).
 
 - The overall structure of the project is:
-    - Python script produces serialized data and sends it to embedded target over UART
-    - Embedded target received data, process it and produces some sort of output
+    - Python script running on the host machine produces, serializes and sends data to embedded device over UART (1152008N1)
+    - Embedded device receives and process serialized data in order to produce a corresponding output
 
 
 - The python script in `scripts/stream_sin_wave.py` is responsible for producing the serialized data
     - In this example, the data being produced corresponds to a stream of samples of a sinusoidal wave
     - [Read more about the sinusoidal wave tunning here](scripts/readme.md)
-    - The data generated can be generated as json, raw binary protobuf or HDLC frames and it can be forwarded to a file, stdout or to a serial port
+    - The samples can be generated as json, protobuf or HDLC frames and it can be streamed either to a file, stdout or to a serial port
 
-- The source code under `src` implements the embedded side code
+- The source code under `src` presents the embedded side of the system
+    - Bytes are received in an UART ISR and injected into a buffer
+    - Upon UART inactivity, a thread processes the bytes, unwrapping the HDLC frame, decoding the protobuf payload and changing a PWM duty cycle according to the samples amplitude.
+
 
 ## How to operate the repository
 - Remember to have the zephyr virtual environment active on the current shell
@@ -58,26 +62,35 @@ $ python scripts/stream_sin_wave.py -op PROTOBUF_TO_FILE -c channel_20_200_2
 $ protoc --decode Batch proto/sin_wave.proto < batch.bin 
 ```
 
-- Once the embedded target is running with the application code and the TTL/USB device is connected between target and host machine, it is time to use the python script to stream a sinusoidal wave to the target
+- Once the embedded device is running with the application code and the TTL/USB device is connected between it and host machine, it is time to use the python script to stream sinusoidal wave samples to the target
+    - When the device starts receiving and processing the wave samples, it'll be possible to see the diming orange LED where the intensity of the LED light is correspondent to the sinwave's current amplitude.
 ```bash
 python scripts/stream_sin_wave.py --loglevel DEBUG --operation HDLC_TO_SERIAL --channel channel_20_20_1 --device /dev/ttyUSB0
 ```
 
 ## This project uses:
 - **zephyr rtos** is used as platform
+    - When using latest versions of zephyr it might be necessary to do the following:
+        - `(.venv) ggm@gAN515-52:~/zephyrproject/zephyr ((HEAD detached at v3.5.0-rc3))$ west config manifest.project-filter +nanopb && west update`
+```bash
+$ git log -n1 --oneline --decorate
+bbf46b96ce (HEAD, tag: v3.5.0-rc3) release: Zephyr 3.5.0-rc3
+```
+
+- **protobuf-compiler** is necessary to transform `.proto` files into source code
+```bash
+$ sudo apt install protobuf-compiler
+$ protoc --version
+libprotoc 3.12.4
+```
+
 - **clang-format** is used as formatter/code beautifier
-- **autopep8** is used to format python scripts
-- **python4yahdlc** is a Python binding of the [yahdlc library](https://github.com/bang-olufsen/yahdlc/tree/master), allowing to encode and decode HDLC frames.
-    - This was installed within zephyr venv with `pip install --upgrade python4yahdlc`
+```bash
+$ clang-format --version
+clang-format version 17.0.2 (https://github.com/ssciwr/clang-format-wheel f928550dfaa8e13ccf1b9f7f76356f461d08c707)
+```
+
 - **yahdlc** is used as HDLC protocol library in C/C++.
     - Link: [yahdlc - Yet Another HDLC](https://github.com/bang-olufsen/yahdlc/tree/master)
-
-### Versions present in development machine:
-- **zephyr:** Zephyr version: 3.4.0 (/home/ggm/zephyrproject/zephyr), build: zephyr-v3.4.0-30-g61824410a9be
-- **clang-format:** Ubuntu clang-format version 14.0.0-1ubuntu1
-- **autopep8** 2.0.4 (was installed within zephyr venv)
-- **python4yahdlc:** 1.3.5 (was installed within zephyr venv)
-- **yahdlc** 1.1
-
-## HDLC
-- High-Level Data Link Control (HDLC) is a bit-oriented code-transparent synchronous data link layer protocol developed by the International Organization for Standardization (ISO). The standard for HDLC is ISO/IEC 13239:2002.
+    - The revision being used here is tag `v1.1` hash `752602a`
+- Python dependencies are listed in `scripts/requirements.txt` with the specific versions used

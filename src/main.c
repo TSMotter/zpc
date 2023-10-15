@@ -312,7 +312,8 @@ void serial_cb_multi_byte(const struct device *dev, void *user_data)
             (re)start a one shot timer that'll expire indicating USART inactivity to let
             the received data to be processed
 
-            - A good dimensioning of this timer is crucial for the responsiveness of this application
+            - A good dimensioning of this timer is crucial for the responsiveness of this
+            application
 
             - UART baud is 115200 bits per second
             - There are 10 bits in each byte (considering start/stop bits)

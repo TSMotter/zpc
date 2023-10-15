@@ -6,16 +6,16 @@ project(zpc LANGUAGES C)
 
 set(SRC_DIR "src")
 
+# list include directories
 set(INCLUDE_DIRS
     "${SRC_DIR}/external"
 )
 
 # nanopb stuff
-set(NANOPB_OPTIONS "-I${CMAKE_SOURCE_DIR}")
-nanopb_generate_cpp(SRC_PROTOBUF proto_headers RELPATH . proto/sin_wave.proto)
-zephyr_library_include_directories(${CMAKE_CURRENT_BINARY_DIR})
+list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
+include(nanopb)
 
-# other 'regular' source files
+# List 'regular' source files
 set(SRC_FILES
     "${SRC_DIR}/main.c"
     "${SRC_DIR}/external/fcs.c"
@@ -23,4 +23,5 @@ set(SRC_FILES
 )
 
 target_include_directories(app PRIVATE ${INCLUDE_DIRS})
-target_sources(app PRIVATE ${SRC_PROTOBUF} ${SRC_FILES})
+zephyr_nanopb_sources(app proto/sin_wave.proto)
+target_sources(app PRIVATE ${SRC_FILES})
