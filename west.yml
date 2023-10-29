@@ -1,0 +1,29 @@
+manifest:
+  group-filter: [-crypto, -fs, -hal, -tee, -tools]
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+  defaults:
+    remote: zephyrproject-rtos
+  projects:
+    # Because I blacklisted the groups above,
+    # only the projects overrided below will be fetched
+    # Overrides removing the 'groups' values.
+    - name: nanopb
+      revision: 42fa8b211e946b90b9d968523fce7b1cfe27617e
+      path: modules/lib/nanopb
+    - name: cmsis
+      revision: 5a00331455dd74e31e80efa383a489faea0590e3
+      path: modules/hal/cmsis
+    - name: hal_st
+      revision: fb8e79d1a261fd02aadff7c142729f1954163cf3
+      path: modules/hal/st
+    - name: hal_stm32
+      revision: 89ef0a3383edebf661073073bcdf6e2836fe90ee
+      path: modules/hal/stm32
+    # This should be last for the overrides to take effect
+    - name: zephyr
+      revision: v3.5.0
+      import: true
+  self:
+    path: zpc

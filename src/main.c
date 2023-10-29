@@ -98,9 +98,10 @@ int main(int argc, char **argv)
 
     k_sem_init(&sem_uart_isr_inactivity, 0, 1);
 
+    /* Led related */
     if (!device_is_ready(led_pwm_orange_dt_spec.dev))
     {
-        // printk("Error: PWM device %s is not ready\n", led_pwm_orange_dt_spec.dev->name);
+        printk("Error: PWM device %s is not ready\n", led_pwm_orange_dt_spec.dev->name);
         return 0;
     }
 
@@ -109,21 +110,21 @@ int main(int argc, char **argv)
         printk("Error while configuring LED\n");
     }
 
-    /* Thread related */
+    /* Consumer thread related */
     static struct k_thread consumer_thread_id;
-    static struct k_thread led_thread_id;
-
     k_thread_create(&consumer_thread_id, consumer_thread_stack,
                     K_THREAD_STACK_SIZEOF(consumer_thread_stack), &consume_bytes,
                     (void *) &samples_msgq, NULL, NULL, CONSUMER_THREAD_PRIO, 0, K_FOREVER);
+    k_thread_name_set(&consumer_thread_id, "consumer_thread");
+    k_thread_start(&consumer_thread_id);
+
+    /* Led thread related */
+    static struct k_thread led_thread_id;
     k_thread_create(&led_thread_id, led_thread_stack, K_THREAD_STACK_SIZEOF(led_thread_stack),
                     &blink_led0, NULL, NULL, NULL, LED_THREAD_PRIO, 0, K_FOREVER);
-
-    k_thread_name_set(&consumer_thread_id, "consumer_thread");
     k_thread_name_set(&led_thread_id, "led_thread");
-
-    k_thread_start(&consumer_thread_id);
     k_thread_start(&led_thread_id);
+
 
     while (1)
     {
@@ -350,7 +351,7 @@ void timer_callback(struct k_timer *dummy)
 static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_field_iter_t *field,
                                               void **arg)
 {
-    // printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
+    printk("custom_repeated_decoding_callback!-> tag:%d\n", field->tag);
 
     struct k_msgq *pmsgq = (struct k_msgq *) *arg;
 
@@ -360,7 +361,7 @@ static bool custom_repeated_decoding_callback(pb_istream_t *stream, const pb_fie
 
         if (!pb_decode(stream, Batch_Sample_fields, &sample_d))
         {
-            // printk("Decoding failed: %s\n", PB_GET_ERROR(stream));
+            printk("Decoding failed: %s\n", PB_GET_ERROR(stream));
             return false;
         }
 
