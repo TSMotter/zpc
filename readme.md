@@ -4,22 +4,40 @@
 - This app implements the producer / consumer concept.
 - This project was developed using `STM32F407 Discovery` development kit but it should be able to run in other targets, since there are only common features being used like LED, GPIO, PWM, timer, Serial (UART).
 
-- The overall structure of the project is:
-    - Python script running on the host machine produces, serializes and sends data to embedded device over UART (1152008N1)
-    - Embedded device receives and process serialized data in order to produce a corresponding output
+## The overall structure of the project is:
+- Python script running on the host machine produces, serializes and sends data to embedded device over UART (1152008N1)
+- Embedded device receives, deserializes and processes the data in order to produce a corresponding output
 
+<img src="docs/system.png" width="800"/>
 
 - The python script in `scripts/stream_sin_wave.py` is responsible for producing the serialized data
     - In this example, the data being produced corresponds to a stream of samples of a sinusoidal wave
     - [Read more about the sinusoidal wave tunning here](scripts/readme.md)
     - The samples can be generated as json, protobuf or HDLC frames and it can be streamed either to a file, stdout or to a serial port
 
-- The source code under `src` presents the embedded side of the system
+- The source code under `src` presents the embedded software of the system
     - Bytes are received in an UART ISR and injected into a buffer
     - Upon UART inactivity, a thread processes the bytes, unwrapping the HDLC frame, decoding the protobuf payload and changing a PWM duty cycle according to the samples amplitude.
 
 
-## How to operate the repository
+# How to operate the repository
+## Cloning and initializing
+- This repository can be cloned and initialized in one of two ways:
+    - Within the system's default zephyr workspace (zephyr as the manifest repository for `west`)
+    ```bash
+    cd ~/zephyrproject
+    git clone git@github.com:TSMotter/zpc.git
+    cd zephyr
+    west config manifest.project-filter +nanopb && west update`
+    ```
+    - In a custom zephyr workspace for itself (zpc as the manifest repository for `west`)
+    ```bash
+    west init -m git@github.com:TSMotter/zpc.git --mr master zpc_workspace
+    cd zpc_workspace
+    west update
+    ```
+
+## Building, flashing and running
 - Remember to have the zephyr virtual environment active on the current shell
 ```bash
 source ~/zephyrproject/.venv/bin/activate
@@ -71,10 +89,10 @@ python scripts/stream_sin_wave.py --loglevel DEBUG --operation HDLC_TO_SERIAL --
 ## This project uses:
 - **zephyr rtos** is used as platform
     - When using latest versions of zephyr it might be necessary to do the following:
-        - `(.venv) ggm@gAN515-52:~/zephyrproject/zephyr ((HEAD detached at v3.5.0-rc3))$ west config manifest.project-filter +nanopb && west update`
+        - `(.venv) ggm@gAN515-52:~/zephyrproject/zephyr ((HEAD detached at v3.5.0))$ west config manifest.project-filter +nanopb && west update`
 ```bash
-$ git log -n1 --oneline --decorate
-bbf46b96ce (HEAD, tag: v3.5.0-rc3) release: Zephyr 3.5.0-rc3
+ggm@gAN515-52:~/zephyrproject/zephyr ((HEAD detached at v3.5.0))$ git log -n1 --oneline --decorate
+a6eef0ba37 (HEAD, tag: zephyr-v3.5.0, tag: v3.5.0) release: Zephyr 3.5.0 release
 ```
 
 - **protobuf-compiler** is necessary to transform `.proto` files into source code

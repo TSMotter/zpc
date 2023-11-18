@@ -1,0 +1,39 @@
+@startuml System
+
+participant "Python Script" as py
+
+box "Embedded Device" #LightBlue
+participant "UART" as uart
+participant "IRQ" as irq
+participant "Timer\n(UART inactivity)" as tim
+control "main" as main #Pink
+database "Buffer" as buf
+control "Consumer Thread" as thr
+end box
+
+
+main -> tim : Timer configuration
+main -> uart : UART configuration
+main -> main : Semaphore \n configuration
+main -> irq : IRQ configuration
+main -> main : GPIO \n configuration
+main -> thr : Threads \n Instantiation
+thr -> thr : Blocks waiting \n for semaphore
+main -> main : Iddle loop
+
+alt This cycle repeats indefinetely
+py -> uart : Stream batch of data
+uart -> irq : Raw bytes
+irq -> buf : Insert bytes in buffer
+irq -> tim : (Re)Starts Timer
+
+tim -> thr : Times out (Gives \n Semaphore)
+thr -> thr : Gets semaphore
+thr <-> buf : Get HDLC frame \n present in buffer
+thr -> thr : Extracts payload \n from HDLC frame \n (protobuf format)
+thr -> thr : Decodes protobuf (nanopb)
+thr -> thr : Changes LED PWM \n DC based on sample \n amplitude
+thr -> thr : Blocks waiting \n for semaphore
+end
+
+@enduml
